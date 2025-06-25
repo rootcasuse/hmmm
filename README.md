@@ -1,4 +1,4 @@
-# Cipher Chat - Secure Web-Based Communication Platform
+# SafeHarbor - Secure Web-Based Communication Platform
 
 A comprehensive secure messaging application with PKI-based digital signatures, end-to-end encryption, and document signing capabilities.
 
@@ -174,5 +174,4 @@ The application includes comprehensive security headers:
 
 This is a demonstration application showcasing modern web cryptography. While it implements industry-standard cryptographic primitives, it should be thoroughly audited before use in production environments where security is critical.
 
-The application is designed for educational purposes and proof-of-concept implementations of secure web communication protocols."# Working" 
-# hmmm
+The application is designed for educational purposes and proof-of-concept implementations of secure web communication protocols.

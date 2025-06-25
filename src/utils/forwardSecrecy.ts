@@ -13,7 +13,7 @@ export class ForwardSecrecy {
   static async deriveMessageKey(
     sharedSecret: CryptoKey,
     salt: Uint8Array,
-    info: string = 'cipher-chat-message'
+    info: string = 'safeharbor-message'
   ): Promise<CryptoKey> {
     // Import shared secret as key material
     const keyMaterial = await window.crypto.subtle.importKey(

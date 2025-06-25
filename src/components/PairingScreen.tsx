@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { KeyRound, Copy, ArrowRight, Shield, Award, Key, User } from 'lucide-react';
+import { KeyRound, Copy, ArrowRight, Shield, Award, Key, User, Clock } from 'lucide-react';
 import Button from './ui/Button';
 import { useChat } from '../context/ChatContext';
 import { useCrypto } from '../context/CryptoContext';
@@ -10,7 +10,7 @@ interface PairingScreenProps {
 
 const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
   const { generateCode, joinChat, pairingCode, isPaired } = useChat();
-  const { certificate, isInitializing, generateCertificate } = useCrypto();
+  const { certificate, isInitializing, generateCertificate, sessionActive, lastActivity } = useCrypto();
   const [inputCode, setInputCode] = useState('');
   const [username, setUsername] = useState('');
   const [showUsernameInput, setShowUsernameInput] = useState(true);
@@ -19,9 +19,8 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
 
-  // Check if we need to show username input
   useEffect(() => {
-    const savedUsername = localStorage.getItem('cipher-username');
+    const savedUsername = localStorage.getItem('safeharbor-username');
     if (savedUsername && certificate) {
       setUsername(savedUsername);
       setShowUsernameInput(false);
@@ -30,7 +29,6 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
     }
   }, [certificate]);
 
-  // Auto-navigate to chat when paired
   useEffect(() => {
     if (isPaired) {
       onPaired();
@@ -49,11 +47,8 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
     }
 
     try {
-      localStorage.setItem('cipher-username', username.trim());
-      
-      // Generate certificate with the username
+      localStorage.setItem('safeharbor-username', username.trim());
       await generateCertificate(username.trim());
-      
       setShowUsernameInput(false);
       setError('');
     } catch (error) {
@@ -104,9 +99,7 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
     setError('');
     try {
       const success = await joinChat(inputCode.trim().toUpperCase());
-      if (success) {
-        // onPaired will be called automatically via useEffect when isPaired becomes true
-      } else {
+      if (!success) {
         setError('Invalid code or room not found. Make sure someone has created the room first.');
       }
     } catch (err) {
@@ -132,13 +125,23 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
     return new Date(timestamp).toLocaleString();
   };
 
+  const getSessionStatus = () => {
+    if (!sessionActive) return { text: 'Session Expired', color: 'text-red-400' };
+    
+    const now = Date.now();
+    const timeSinceActivity = now - lastActivity;
+    
+    if (timeSinceActivity < 60000) return { text: 'Active', color: 'text-green-400' };
+    if (timeSinceActivity < 300000) return { text: 'Recently Active', color: 'text-yellow-400' };
+    return { text: 'Idle', color: 'text-orange-400' };
+  };
+
   const resetUsername = () => {
-    localStorage.removeItem('cipher-username');
+    localStorage.removeItem('safeharbor-username');
     setUsername('');
     setShowUsernameInput(true);
   };
 
-  // Show loading state while crypto is initializing
   if (isInitializing) {
     return (
       <div className="min-h-screen bg-gradient-to-b from-gray-900 to-indigo-900 flex flex-col items-center justify-center p-8">
@@ -146,7 +149,7 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
           <div className="w-20 h-20 bg-indigo-600 rounded-full flex items-center justify-center mx-auto mb-6">
             <Shield className="w-10 h-10 text-white animate-pulse" />
           </div>
-          <h1 className="text-4xl font-bold mb-3 text-white">Cipher Chat</h1>
+          <h1 className="text-4xl font-bold mb-3 text-white">SafeHarbor</h1>
           <p className="text-xl text-indigo-300 mb-6">Initializing Security...</p>
           
           <div className="bg-gray-800/50 backdrop-blur-sm rounded-lg p-6 max-w-md mx-auto">
@@ -164,16 +167,17 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
     );
   }
 
+  const sessionStatus = getSessionStatus();
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-gray-900 to-indigo-900 flex flex-col items-center justify-center p-8">
       <div className="mb-8 text-center">
         <div className="w-20 h-20 bg-indigo-600 rounded-full flex items-center justify-center mx-auto mb-6">
           <Shield className="w-10 h-10 text-white" />
         </div>
-        <h1 className="text-4xl font-bold mb-3 text-white">Cipher Chat</h1>
+        <h1 className="text-4xl font-bold mb-3 text-white">SafeHarbor</h1>
         <p className="text-xl text-indigo-300">PKI-Secured Anonymous Messaging</p>
         
-        {/* Username Display */}
         {!showUsernameInput && username && (
           <div className="mt-6 bg-gray-800/50 backdrop-blur-sm rounded-lg p-4 max-w-md mx-auto">
             <div className="flex items-center justify-center space-x-2 mb-2">
@@ -189,7 +193,6 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
           </div>
         )}
         
-        {/* Certificate Status */}
         {certificate && !showUsernameInput && (
           <div className="mt-4 bg-gray-800/50 backdrop-blur-sm rounded-lg p-4 max-w-md mx-auto">
             <div className="flex items-center justify-center space-x-2 mb-2">
@@ -198,14 +201,18 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
             </div>
             <div className="text-sm text-gray-300 space-y-1">
               <p><strong>Certificate:</strong> {certificate.subject.split('-')[0]}</p>
-              <p><strong>Expires:</strong> {formatDate(certificate.expiresAt)}</p>
+              <div className="flex items-center justify-center space-x-2">
+                <Clock className="w-4 h-4" />
+                <span className="text-sm">Session Status:</span>
+                <span className={`font-medium ${sessionStatus.color}`}>{sessionStatus.text}</span>
+              </div>
+              <p className="text-xs text-gray-400">Valid while session is active</p>
             </div>
           </div>
         )}
       </div>
 
       <div className="w-full max-w-md space-y-6">
-        {/* Username Input */}
         {showUsernameInput && (
           <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 shadow-xl border border-gray-700">
             <h2 className="text-xl font-semibold mb-4 flex items-center">
@@ -237,7 +244,6 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
           </div>
         )}
 
-        {/* Chat Controls - Only show when username is set */}
         {!showUsernameInput && (
           <>
             <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 shadow-xl border border-gray-700">
@@ -277,13 +283,18 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
                     onClick={handleGenerateCode}
                     isLoading={isGenerating}
                     className="w-full"
-                    disabled={!certificate}
+                    disabled={!certificate || !sessionActive}
                   >
                     Generate Secure Code
                   </Button>
                   {!certificate && (
                     <p className="text-sm text-amber-400 mt-2 text-center">
                       Creating digital certificate...
+                    </p>
+                  )}
+                  {!sessionActive && (
+                    <p className="text-sm text-red-400 mt-2 text-center">
+                      Session expired. Please refresh the page.
                     </p>
                   )}
                 </>
@@ -306,7 +317,7 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
                   onClick={handleJoinChat}
                   isLoading={isJoining}
                   className="w-full"
-                  disabled={!inputCode.trim() || !certificate}
+                  disabled={!inputCode.trim() || !certificate || !sessionActive}
                 >
                   Join Chat
                   <ArrowRight className="ml-2 w-5 h-5" />
@@ -314,6 +325,11 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
                 {!certificate && (
                   <p className="text-sm text-amber-400 text-center">
                     Waiting for certificate initialization...
+                  </p>
+                )}
+                {!sessionActive && (
+                  <p className="text-sm text-red-400 text-center">
+                    Session expired. Please refresh the page.
                   </p>
                 )}
               </div>
@@ -327,7 +343,6 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
           </div>
         )}
 
-        {/* Security Features - Only show when not setting username */}
         {!showUsernameInput && (
           <div className="bg-gray-800/30 backdrop-blur-sm rounded-xl p-6 border border-gray-700">
             <h3 className="text-lg font-semibold mb-4 text-center">Security Features</h3>
@@ -343,6 +358,10 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
               <div className="flex items-center space-x-3">
                 <Key className="w-4 h-4 text-purple-400 flex-shrink-0" />
                 <span>Document signing and verification</span>
+              </div>
+              <div className="flex items-center space-x-3">
+                <Clock className="w-4 h-4 text-orange-400 flex-shrink-0" />
+                <span>Session-based validity with activity monitoring</span>
               </div>
             </div>
           </div>

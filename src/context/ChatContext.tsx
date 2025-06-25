@@ -5,16 +5,16 @@ import { useCrypto } from './CryptoContext';
 
 // Use localStorage for room storage
 const getRooms = () => {
-  const rooms = localStorage.getItem('chatRooms');
+  const rooms = localStorage.getItem('safeharborRooms');
   return rooms ? JSON.parse(rooms) : {};
 };
 
 const saveRooms = (rooms: any) => {
-  localStorage.setItem('chatRooms', JSON.stringify(rooms));
+  localStorage.setItem('safeharborRooms', JSON.stringify(rooms));
 };
 
 // Setup BroadcastChannel for cross-tab communication
-const broadcastChannel = new BroadcastChannel('chat_channel');
+const broadcastChannel = new BroadcastChannel('safeharbor_channel');
 
 interface ChatContextType {
   messages: Message[];

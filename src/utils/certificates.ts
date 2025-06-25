@@ -24,8 +24,8 @@ export class CertificateManager {
     const privateKeyData = await this.exportPrivateKey(keyPair.privateKey);
 
     this.ca = {
-      id: 'cipher-ca-' + Date.now(),
-      name: 'Cipher Chat CA',
+      id: 'safeharbor-ca-' + Date.now(),
+      name: 'SafeHarbor CA',
       publicKey: publicKeyData,
       privateKey: privateKeyData
     };
