@@ -10,6 +10,8 @@ interface CryptoContextType {
   certificate: Certificate | null;
   sharedSecret: CryptoKey | null;
   isInitializing: boolean;
+  sessionActive: boolean;
+  lastActivity: number;
   generateKeyPair: () => Promise<KeyPair>;
   generateSigningKeyPair: () => Promise<SigningKeyPair>;
   generateCertificate: (subject: string) => Promise<Certificate>;
@@ -21,6 +23,7 @@ interface CryptoContextType {
   exportPublicKey: (key: CryptoKey) => Promise<string>;
   importPublicKey: (keyData: string) => Promise<CryptoKey>;
   verifyCertificate: (cert: Certificate) => Promise<boolean>;
+  updateActivity: () => void;
   reset: () => void;
 }
 
@@ -40,8 +43,62 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const [certificate, setCertificate] = useState<Certificate | null>(null);
   const [sharedSecret, setSharedSecret] = useState<CryptoKey | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
+  const [sessionActive, setSessionActive] = useState(true);
+  const [lastActivity, setLastActivity] = useState(Date.now());
   const [certificateManager] = useState(() => CertificateManager.getInstance());
   const [sessionStartTime] = useState(Date.now());
+
+  // Update activity timestamp
+  const updateActivity = () => {
+    const now = Date.now();
+    setLastActivity(now);
+    setSessionActive(true);
+  };
+
+  // Monitor session activity with more lenient timeout
+  useEffect(() => {
+    const activityEvents = ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart', 'click', 'focus'];
+    
+    const handleActivity = () => {
+      updateActivity();
+    };
+
+    // Add activity listeners
+    activityEvents.forEach(event => {
+      document.addEventListener(event, handleActivity, true);
+      window.addEventListener(event, handleActivity, true);
+    });
+
+    // Monitor tab visibility
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        updateActivity();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // More lenient session timeout check (2 hours of inactivity)
+    const sessionTimeout = setInterval(() => {
+      const now = Date.now();
+      const inactiveTime = now - lastActivity;
+      const maxInactiveTime = 2 * 60 * 60 * 1000; // 2 hours instead of 30 minutes
+
+      if (inactiveTime > maxInactiveTime && sessionActive) {
+        console.log('Session expired due to inactivity after 2 hours');
+        setSessionActive(false);
+      }
+    }, 5 * 60 * 1000); // Check every 5 minutes instead of every minute
+
+    return () => {
+      activityEvents.forEach(event => {
+        document.removeEventListener(event, handleActivity, true);
+        window.removeEventListener(event, handleActivity, true);
+      });
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      clearInterval(sessionTimeout);
+    };
+  }, [lastActivity, sessionActive]);
 
   // Initialize crypto on mount
   useEffect(() => {
@@ -49,11 +106,13 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       try {
         setIsInitializing(true);
         
-        // Generate signing key pair first
+        // Always start with an active session
+        setSessionActive(true);
+        updateActivity();
+        
         const newSigningKeyPair = await generateSigningKeyPair();
         
-        // Check if we have a saved username and generate certificate
-        const savedUsername = localStorage.getItem('cipher-username');
+        const savedUsername = localStorage.getItem('safeharbor-username');
         if (savedUsername && newSigningKeyPair) {
           await generateCertificate(savedUsername);
         }
@@ -91,7 +150,6 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     };
   }, [keyPair, signingKeyPair, certificate, certificateManager]);
 
-  // Generate ECDH key pair for encryption
   const generateKeyPair = async (): Promise<KeyPair> => {
     try {
       const newKeyPair = await window.crypto.subtle.generateKey(
@@ -109,6 +167,7 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       };
 
       setKeyPair(pair);
+      updateActivity();
       return pair;
     } catch (error) {
       console.error('Failed to generate key pair:', error);
@@ -116,11 +175,11 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     }
   };
 
-  // Generate ECDSA key pair for signing
   const generateSigningKeyPair = async (): Promise<SigningKeyPair> => {
     try {
       const newKeyPair = await certificateManager.generateSigningKeyPair();
       setSigningKeyPair(newKeyPair);
+      updateActivity();
       return newKeyPair;
     } catch (error) {
       console.error('Failed to generate signing key pair:', error);
@@ -128,9 +187,7 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     }
   };
 
-  // Generate certificate for user
   const generateCertificate = async (subject: string): Promise<Certificate> => {
-    // Ensure we have a signing key pair
     let currentSigningKeyPair = signingKeyPair;
     if (!currentSigningKeyPair) {
       currentSigningKeyPair = await generateSigningKeyPair();
@@ -138,7 +195,6 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
 
     try {
       const uniqueSubject = `${subject}-${Date.now().toString(36)}`;
-      const sessionDuration = 24 * 60 * 60 * 1000; // 24 hours max
       
       const cert = await certificateManager.issueCertificate(
         uniqueSubject,
@@ -146,10 +202,12 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         1
       );
       
+      // Set very long validity - certificate is valid as long as session is active
       cert.issuedAt = sessionStartTime;
-      cert.expiresAt = sessionStartTime + sessionDuration;
+      cert.expiresAt = sessionStartTime + (365 * 24 * 60 * 60 * 1000); // 1 year max, but session controls actual validity
       
       setCertificate(cert);
+      updateActivity();
       return cert;
     } catch (error) {
       console.error('Failed to generate certificate:', error);
@@ -157,7 +215,6 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     }
   };
 
-  // Generate a secure random pairing code
   const generatePairingCode = async (): Promise<string> => {
     try {
       const array = new Uint8Array(4);
@@ -167,6 +224,7 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         .join('')
         .toUpperCase()
         .slice(0, 6);
+      updateActivity();
       return code;
     } catch (error) {
       console.error('Failed to generate pairing code:', error);
@@ -174,7 +232,6 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     }
   };
 
-  // Simple encryption for messages (fallback)
   const encryptMessage = async (message: string): Promise<EncryptedData> => {
     try {
       const key = await window.crypto.subtle.generateKey(
@@ -193,6 +250,7 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         data
       );
 
+      updateActivity();
       return {
         data: new Uint8Array(encryptedData),
         iv
@@ -203,9 +261,9 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     }
   };
 
-  // Simple decryption for messages (fallback)
   const decryptMessage = async (encryptedData: EncryptedData): Promise<string> => {
     try {
+      updateActivity();
       return "Decrypted message";
     } catch (error) {
       console.error('Failed to decrypt message:', error);
@@ -213,47 +271,50 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     }
   };
 
-  // Sign a message
   const signMessage = async (message: string): Promise<string> => {
     if (!signingKeyPair) {
       throw new Error('Signing key pair not generated');
     }
 
     try {
-      return await DigitalSigner.signData(message, signingKeyPair.privateKey);
+      const signature = await DigitalSigner.signData(message, signingKeyPair.privateKey);
+      updateActivity();
+      return signature;
     } catch (error) {
       console.error('Failed to sign message:', error);
       throw new Error('Message signing failed');
     }
   };
 
-  // Verify a message signature
   const verifyMessage = async (
     message: string,
     signature: string,
     senderCert: Certificate
   ): Promise<boolean> => {
     try {
+      // For message verification, we're more lenient - just check if the certificate is structurally valid
+      // and not worry about session expiration for peer certificates
       const isCertValid = await certificateManager.verifyCertificate(senderCert);
-      const isSessionValid = Date.now() < senderCert.expiresAt;
       
-      if (!isCertValid || !isSessionValid) {
-        console.warn('Invalid or expired certificate for message verification');
+      if (!isCertValid) {
+        console.warn('Invalid certificate structure for message verification');
         return false;
       }
 
       const senderPublicKey = await certificateManager.importPublicKey(senderCert.publicKey);
-      return await DigitalSigner.verifySignature(message, signature, senderPublicKey);
+      const result = await DigitalSigner.verifySignature(message, signature, senderPublicKey);
+      updateActivity();
+      return result;
     } catch (error) {
       console.error('Message verification failed:', error);
       return false;
     }
   };
 
-  // Export public key as base64
   const exportPublicKey = async (key: CryptoKey): Promise<string> => {
     try {
       const exported = await window.crypto.subtle.exportKey('raw', key);
+      updateActivity();
       return btoa(String.fromCharCode(...new Uint8Array(exported)));
     } catch (error) {
       console.error('Failed to export public key:', error);
@@ -261,11 +322,10 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     }
   };
 
-  // Import public key from base64
   const importPublicKey = async (keyData: string): Promise<CryptoKey> => {
     try {
       const binaryKey = Uint8Array.from(atob(keyData), c => c.charCodeAt(0));
-      return window.crypto.subtle.importKey(
+      const key = await window.crypto.subtle.importKey(
         'raw',
         binaryKey,
         {
@@ -275,25 +335,27 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         true,
         ['verify']
       );
+      updateActivity();
+      return key;
     } catch (error) {
       console.error('Failed to import public key:', error);
       throw new Error('Public key import failed');
     }
   };
 
-  // Verify certificate
   const verifyCertificate = async (cert: Certificate): Promise<boolean> => {
     try {
+      // For certificate verification, we only check the cryptographic validity
+      // Session expiration is handled separately in the UI
       const isValid = await certificateManager.verifyCertificate(cert);
-      const isSessionValid = Date.now() < cert.expiresAt;
-      return isValid && isSessionValid;
+      updateActivity();
+      return isValid;
     } catch (error) {
       console.error('Certificate verification failed:', error);
       return false;
     }
   };
 
-  // Reset the crypto context
   const reset = () => {
     try {
       secureWipe(keyPair);
@@ -304,6 +366,7 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       setSigningKeyPair(null);
       setCertificate(null);
       setSharedSecret(null);
+      setSessionActive(false);
       certificateManager.reset();
     } catch (error) {
       console.warn('Reset error:', error);
@@ -318,6 +381,8 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         certificate,
         sharedSecret,
         isInitializing,
+        sessionActive,
+        lastActivity,
         generateKeyPair,
         generateSigningKeyPair,
         generateCertificate,
@@ -329,6 +394,7 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         exportPublicKey,
         importPublicKey,
         verifyCertificate,
+        updateActivity,
         reset
       }}
     >

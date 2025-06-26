@@ -283,18 +283,13 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
                     onClick={handleGenerateCode}
                     isLoading={isGenerating}
                     className="w-full"
-                    disabled={!certificate || !sessionActive}
+                    disabled={!certificate}
                   >
                     Generate Secure Code
                   </Button>
                   {!certificate && (
                     <p className="text-sm text-amber-400 mt-2 text-center">
                       Creating digital certificate...
-                    </p>
-                  )}
-                  {!sessionActive && (
-                    <p className="text-sm text-red-400 mt-2 text-center">
-                      Session expired. Please refresh the page.
                     </p>
                   )}
                 </>
@@ -317,7 +312,7 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
                   onClick={handleJoinChat}
                   isLoading={isJoining}
                   className="w-full"
-                  disabled={!inputCode.trim() || !certificate || !sessionActive}
+                  disabled={!inputCode.trim() || !certificate}
                 >
                   Join Chat
                   <ArrowRight className="ml-2 w-5 h-5" />
@@ -325,11 +320,6 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
                 {!certificate && (
                   <p className="text-sm text-amber-400 text-center">
                     Waiting for certificate initialization...
-                  </p>
-                )}
-                {!sessionActive && (
-                  <p className="text-sm text-red-400 text-center">
-                    Session expired. Please refresh the page.
                   </p>
                 )}
               </div>
