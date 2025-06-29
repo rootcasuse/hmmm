@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Mic, Square, Play, Pause, Trash2, Send, AlertCircle, Settings, RefreshCw, CheckCircle, Volume2 } from 'lucide-react';
+import { Mic, Square, Play, Pause, Trash2, Send, AlertCircle, Settings, RefreshCw, CheckCircle, Volume2, Bug } from 'lucide-react';
 import Button from './ui/Button';
+import AudioDiagnostics from './AudioDiagnostics';
 
 interface VoiceRecorderProps {
   onSendAudio: (audioBlob: Blob, duration: number) => void;
@@ -44,8 +45,8 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
   });
 
   const [isPlaying, setIsPlaying] = useState(false);
-  const [showTroubleshooting, setShowTroubleshooting] = useState(false);
-  const [browserInfo, setBrowserInfo] = useState<string>('');
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
 
   // Refs for managing recording resources
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -85,36 +86,6 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
     }
   }, []);
 
-  // Get browser information for troubleshooting
-  useEffect(() => {
-    const getBrowserInfo = () => {
-      const ua = navigator.userAgent;
-      const isChrome = ua.includes('Chrome');
-      const isFirefox = ua.includes('Firefox');
-      const isSafari = ua.includes('Safari') && !isChrome;
-      const isEdge = ua.includes('Edge');
-      
-      let browser = 'Unknown';
-      if (isChrome) browser = 'Chrome';
-      else if (isFirefox) browser = 'Firefox';
-      else if (isSafari) browser = 'Safari';
-      else if (isEdge) browser = 'Edge';
-      
-      const info = [
-        `Browser: ${browser}`,
-        `HTTPS: ${location.protocol === 'https:'}`,
-        `MediaDevices: ${!!navigator.mediaDevices}`,
-        `getUserMedia: ${!!navigator.mediaDevices?.getUserMedia}`,
-        `MediaRecorder: ${!!window.MediaRecorder}`,
-        `Host: ${location.hostname}`
-      ].join('\n');
-      
-      setBrowserInfo(info);
-    };
-    
-    getBrowserInfo();
-  }, []);
-
   // Timer effect for recording duration
   useEffect(() => {
     if (recordingState.isRecording && !recordingState.isPaused) {
@@ -145,75 +116,9 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
   }, [cleanup]);
 
   /**
-   * Check if browser supports audio recording
-   */
-  const checkBrowserSupport = useCallback((): { supported: boolean; issues: string[] } => {
-    const issues: string[] = [];
-    
-    if (!navigator.mediaDevices) {
-      issues.push('MediaDevices API not supported');
-    }
-    
-    if (!navigator.mediaDevices?.getUserMedia) {
-      issues.push('getUserMedia not supported');
-    }
-    
-    if (!window.MediaRecorder) {
-      issues.push('MediaRecorder API not supported');
-    }
-    
-    if (location.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(location.hostname)) {
-      issues.push('HTTPS required for microphone access');
-    }
-    
-    return {
-      supported: issues.length === 0,
-      issues
-    };
-  }, []);
-
-  /**
-   * Get the best supported audio MIME type
-   */
-  const getBestSupportedMimeType = useCallback((): string => {
-    const types = [
-      'audio/webm;codecs=opus',
-      'audio/webm',
-      'audio/mp4',
-      'audio/ogg;codecs=opus',
-      'audio/ogg',
-      'audio/wav'
-    ];
-    
-    for (const type of types) {
-      try {
-        if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(type)) {
-          return type;
-        }
-      } catch (error) {
-        console.warn(`Error checking MIME type ${type}:`, error);
-      }
-    }
-    
-    return 'audio/webm'; // Fallback
-  }, []);
-
-  /**
-   * Request microphone permission with comprehensive error handling
+   * Enhanced microphone permission request with better error handling
    */
   const requestMicrophonePermission = useCallback(async (): Promise<boolean> => {
-    // Check browser support first
-    const support = checkBrowserSupport();
-    if (!support.supported) {
-      setPermissionState({
-        status: 'denied',
-        error: `Browser not supported: ${support.issues.join(', ')}. Please use Chrome, Firefox, Safari, or Edge with HTTPS.`,
-        isChecking: false,
-        hasBeenRequested: true
-      });
-      return false;
-    }
-
     setPermissionState(prev => ({ 
       ...prev, 
       isChecking: true, 
@@ -222,8 +127,18 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
     }));
 
     try {
-      // Request microphone access with specific constraints
-      const stream = await navigator.mediaDevices.getUserMedia({
+      // First, check if we're in a secure context
+      if (location.protocol !== 'https:' && !['localhost', '127.0.0.1'].includes(location.hostname)) {
+        throw new Error('HTTPS required for microphone access. Please use a secure connection.');
+      }
+
+      // Check basic API support
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error('Your browser does not support audio recording. Please use Chrome, Firefox, Safari, or Edge.');
+      }
+
+      // Try to get microphone access with comprehensive constraints
+      const constraints = {
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
@@ -231,30 +146,63 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
           sampleRate: { ideal: 44100, min: 8000 },
           channelCount: { ideal: 1, max: 2 }
         }
-      });
+      };
+
+      console.log('Requesting microphone access with constraints:', constraints);
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
 
       // Verify we got valid audio tracks
       const audioTracks = stream.getAudioTracks();
+      console.log('Audio tracks received:', audioTracks.length);
+      
       if (audioTracks.length === 0) {
-        throw new Error('No audio tracks available');
+        stream.getTracks().forEach(track => track.stop());
+        throw new Error('No audio tracks available. Please check your microphone connection.');
       }
 
       const track = audioTracks[0];
+      console.log('Audio track settings:', track.getSettings());
+      
       if (track.readyState !== 'live') {
-        throw new Error('Microphone not ready');
+        stream.getTracks().forEach(track => track.stop());
+        throw new Error('Microphone is not ready. Please check your microphone settings.');
       }
 
-      // Test MediaRecorder with the stream
-      const mimeType = getBestSupportedMimeType();
+      // Test MediaRecorder creation
+      const supportedMimeTypes = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/ogg;codecs=opus',
+        'audio/wav'
+      ];
+
+      let workingMimeType = '';
+      for (const mimeType of supportedMimeTypes) {
+        if (MediaRecorder.isTypeSupported(mimeType)) {
+          workingMimeType = mimeType;
+          break;
+        }
+      }
+
+      if (!workingMimeType) {
+        console.warn('No supported MIME types found, using default');
+        workingMimeType = 'audio/webm';
+      }
+
+      console.log('Using MIME type:', workingMimeType);
+
+      // Test MediaRecorder creation
       try {
-        const testRecorder = new MediaRecorder(stream, { mimeType });
-        testRecorder.stop(); // Stop immediately, we just wanted to test creation
+        const testRecorder = new MediaRecorder(stream, { mimeType: workingMimeType });
+        console.log('MediaRecorder created successfully');
+        testRecorder.stop(); // Stop immediately
       } catch (recorderError) {
-        console.warn('MediaRecorder test failed:', recorderError);
+        console.error('MediaRecorder test failed:', recorderError);
         // Continue anyway, might work during actual recording
       }
 
-      // Success! Clean up test stream
+      // Clean up test stream
       stream.getTracks().forEach(track => track.stop());
       
       setPermissionState({
@@ -264,51 +212,69 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
         hasBeenRequested: true
       });
 
+      setRetryCount(0); // Reset retry count on success
       return true;
 
     } catch (error) {
       console.error('Microphone permission failed:', error);
+      setRetryCount(prev => prev + 1);
       
       let errorMessage = 'Microphone access failed. ';
+      let suggestion = '';
       
       if (error instanceof Error) {
         switch (error.name) {
           case 'NotAllowedError':
-            errorMessage = 'Microphone access denied. Please click the microphone icon in your browser\'s address bar and select "Allow", then try again.';
+            errorMessage = 'Microphone access denied.';
+            suggestion = 'Please click the microphone icon in your browser\'s address bar and select "Allow", then try again.';
             break;
           case 'NotFoundError':
-            errorMessage = 'No microphone found. Please connect a microphone and try again.';
+            errorMessage = 'No microphone found.';
+            suggestion = 'Please connect a microphone and try again.';
             break;
           case 'NotSupportedError':
-            errorMessage = 'Audio recording is not supported in this browser. Please use Chrome, Firefox, Safari, or Edge.';
+            errorMessage = 'Audio recording not supported.';
+            suggestion = 'Please use Chrome, Firefox, Safari, or Edge.';
             break;
           case 'NotReadableError':
-            errorMessage = 'Microphone is already in use by another application. Please close other apps using the microphone and try again.';
+            errorMessage = 'Microphone is already in use.';
+            suggestion = 'Please close other applications using the microphone and try again.';
             break;
           case 'OverconstrainedError':
-            errorMessage = 'Your microphone doesn\'t meet the required specifications. Please try with a different microphone.';
+            errorMessage = 'Microphone constraints not met.';
+            suggestion = 'Please try with a different microphone or check your audio settings.';
             break;
           case 'SecurityError':
-            errorMessage = 'Microphone access blocked due to security restrictions. Please ensure you\'re using HTTPS.';
+            errorMessage = 'Security restriction.';
+            suggestion = 'Please ensure you\'re using HTTPS and try again.';
             break;
           default:
-            errorMessage += error.message || 'Please check your microphone settings and try again.';
+            if (error.message.includes('HTTPS')) {
+              errorMessage = error.message;
+              suggestion = 'Please access this site using HTTPS.';
+            } else if (error.message.includes('browser')) {
+              errorMessage = error.message;
+              suggestion = 'Please update your browser or try a different one.';
+            } else {
+              errorMessage += error.message;
+              suggestion = 'Please check your microphone settings and try again.';
+            }
         }
       }
       
       setPermissionState({
         status: 'denied',
-        error: errorMessage,
+        error: `${errorMessage} ${suggestion}`,
         isChecking: false,
         hasBeenRequested: true
       });
       
       return false;
     }
-  }, [checkBrowserSupport, getBestSupportedMimeType]);
+  }, []);
 
   /**
-   * Start audio recording
+   * Start audio recording with enhanced error handling
    */
   const startRecording = async () => {
     // Request permission if not already granted
@@ -340,34 +306,62 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       audioStreamRef.current = stream;
       audioChunksRef.current = [];
       
-      // Create MediaRecorder
-      const mimeType = getBestSupportedMimeType();
+      // Create MediaRecorder with fallback MIME types
+      const mimeTypes = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/ogg;codecs=opus',
+        'audio/wav'
+      ];
+
       let recorder: MediaRecorder;
-      
-      try {
-        recorder = new MediaRecorder(stream, { 
-          mimeType,
-          audioBitsPerSecond: 128000
-        });
-      } catch (mimeError) {
-        console.warn('Failed with preferred settings, trying defaults:', mimeError);
-        recorder = new MediaRecorder(stream);
+      let usedMimeType = '';
+
+      for (const mimeType of mimeTypes) {
+        try {
+          if (MediaRecorder.isTypeSupported(mimeType)) {
+            recorder = new MediaRecorder(stream, { 
+              mimeType,
+              audioBitsPerSecond: 128000
+            });
+            usedMimeType = mimeType;
+            break;
+          }
+        } catch (error) {
+          console.warn(`Failed to create recorder with ${mimeType}:`, error);
+        }
+      }
+
+      // Fallback to default if no specific type worked
+      if (!recorder!) {
+        try {
+          recorder = new MediaRecorder(stream);
+          usedMimeType = 'default';
+        } catch (error) {
+          throw new Error('Failed to create MediaRecorder with any configuration');
+        }
       }
       
       mediaRecorderRef.current = recorder;
+      console.log('Recording started with MIME type:', usedMimeType);
 
       // Set up event handlers
       recorder.ondataavailable = (event) => {
+        console.log('Data available:', event.data.size, 'bytes');
         if (event.data && event.data.size > 0) {
           audioChunksRef.current.push(event.data);
         }
       };
 
       recorder.onstop = () => {
+        console.log('Recording stopped, chunks:', audioChunksRef.current.length);
         if (audioChunksRef.current.length > 0) {
           const audioBlob = new Blob(audioChunksRef.current, { 
-            type: recorder.mimeType || mimeType 
+            type: recorder.mimeType || usedMimeType || 'audio/webm'
           });
+          
+          console.log('Created blob:', audioBlob.size, 'bytes');
           
           if (audioBlob.size > 0) {
             const audioUrl = URL.createObjectURL(audioBlob);
@@ -382,9 +376,14 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
           } else {
             setPermissionState(prev => ({
               ...prev,
-              error: 'Recording failed - no audio data captured. Please check your microphone.'
+              error: 'Recording failed - no audio data captured. Please check your microphone and try again.'
             }));
           }
+        } else {
+          setPermissionState(prev => ({
+            ...prev,
+            error: 'Recording failed - no audio data received. Please check your microphone settings.'
+          }));
         }
         cleanup();
       };
@@ -393,13 +392,13 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
         console.error('MediaRecorder error:', event);
         setPermissionState(prev => ({
           ...prev,
-          error: 'Recording failed. Please try again.'
+          error: 'Recording failed due to an internal error. Please try again.'
         }));
         stopRecording();
       };
 
-      // Start recording
-      recorder.start(1000);
+      // Start recording with data collection every 100ms
+      recorder.start(100);
       
       setRecordingState(prev => ({
         ...prev,
@@ -414,7 +413,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       console.error('Failed to start recording:', error);
       setPermissionState(prev => ({
         ...prev,
-        error: 'Failed to start recording. Please check your microphone and try again.'
+        error: `Failed to start recording: ${error instanceof Error ? error.message : 'Unknown error'}. Please check your microphone and try again.`
       }));
       cleanup();
     }
@@ -507,46 +506,47 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
   };
 
   /**
-   * Reset permission state
+   * Reset permission state and retry
    */
-  const resetPermissionState = () => {
+  const resetAndRetry = () => {
     setPermissionState({
       status: 'unknown',
       error: null,
       isChecking: false,
       hasBeenRequested: false
     });
+    setRetryCount(0);
   };
 
-  /**
-   * Open browser settings help
-   */
-  const showBrowserHelp = () => {
-    const userAgent = navigator.userAgent.toLowerCase();
-    let instructions = '';
-    
-    if (userAgent.includes('chrome')) {
-      instructions = '1. Click the microphone icon in the address bar\n2. Select "Allow"\n3. Or go to Settings > Privacy and security > Site Settings > Microphone';
-    } else if (userAgent.includes('firefox')) {
-      instructions = '1. Click the microphone icon in the address bar\n2. Select "Allow"\n3. Or go to Preferences > Privacy & Security > Permissions > Microphone';
-    } else if (userAgent.includes('safari')) {
-      instructions = '1. Go to Safari > Preferences > Websites > Microphone\n2. Set this site to "Allow"';
-    } else if (userAgent.includes('edge')) {
-      instructions = '1. Click the microphone icon in the address bar\n2. Select "Allow"\n3. Or go to Settings > Site permissions > Microphone';
-    } else {
-      instructions = '1. Look for a microphone icon in your browser\'s address bar\n2. Click it and select "Allow"\n3. Check your browser\'s privacy/security settings';
-    }
-    
-    alert(`To enable microphone access:\n\n${instructions}\n\nAfter changing permissions, refresh this page and try again.`);
-  };
+  // Show diagnostics if requested
+  if (showDiagnostics) {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h3 className="text-lg font-semibold text-white">Audio System Diagnostics</h3>
+          <Button
+            onClick={() => setShowDiagnostics(false)}
+            variant="secondary"
+            size="sm"
+          >
+            Back to Recorder
+          </Button>
+        </div>
+        <AudioDiagnostics />
+      </div>
+    );
+  }
 
-  // Show error state with troubleshooting
+  // Show error state with enhanced troubleshooting
   if (permissionState.error) {
     return (
       <div className={`bg-red-900/20 border border-red-700 rounded-lg p-4 ${className}`}>
         <div className="flex items-center space-x-2 mb-3">
           <AlertCircle className="w-5 h-5 text-red-400" />
           <span className="text-red-400 font-medium">Audio System Error</span>
+          {retryCount > 0 && (
+            <span className="text-xs text-gray-400">(Attempt {retryCount})</span>
+          )}
         </div>
         
         <p className="text-red-300 text-sm mb-4">{permissionState.error}</p>
@@ -560,71 +560,39 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
             isLoading={permissionState.isChecking}
           >
             <Mic className="w-4 h-4 mr-1" />
-            {permissionState.isChecking ? 'Checking...' : 'Request Permission'}
+            {permissionState.isChecking ? 'Checking...' : 'Try Again'}
           </Button>
           
           <Button
-            onClick={resetPermissionState}
+            onClick={resetAndRetry}
             variant="secondary"
             size="sm"
           >
             <RefreshCw className="w-4 h-4 mr-1" />
-            Retry
+            Reset
           </Button>
           
           <Button
-            onClick={showBrowserHelp}
+            onClick={() => setShowDiagnostics(true)}
             variant="secondary"
             size="sm"
           >
-            <Settings className="w-4 h-4 mr-1" />
-            Settings Help
+            <Bug className="w-4 h-4 mr-1" />
+            Diagnostics
           </Button>
         </div>
-        
-        <button
-          onClick={() => setShowTroubleshooting(!showTroubleshooting)}
-          className="text-sm text-gray-400 hover:text-white transition-colors"
-        >
-          {showTroubleshooting ? 'Hide' : 'Show'} troubleshooting info
-        </button>
-        
-        {showTroubleshooting && (
-          <div className="mt-4 p-3 bg-gray-800 rounded border border-gray-600">
-            <h4 className="text-sm font-medium text-white mb-2">Troubleshooting Steps:</h4>
-            <div className="text-xs text-gray-300 space-y-2">
-              <div>
-                <p className="font-medium">1. Check browser permissions:</p>
-                <ul className="list-disc list-inside ml-4">
-                  <li>Look for a microphone icon in the address bar</li>
-                  <li>Click it and select "Allow"</li>
-                  <li>Refresh the page after changing permissions</li>
-                </ul>
-              </div>
-              
-              <div>
-                <p className="font-medium">2. Check system settings:</p>
-                <ul className="list-disc list-inside ml-4">
-                  <li>Ensure your microphone is connected and working</li>
-                  <li>Close other apps that might be using the microphone</li>
-                  <li>Try a different microphone if available</li>
-                </ul>
-              </div>
-              
-              <div>
-                <p className="font-medium">3. Browser requirements:</p>
-                <ul className="list-disc list-inside ml-4">
-                  <li>Use Chrome, Firefox, Safari, or Edge</li>
-                  <li>Ensure you're on HTTPS (secure connection)</li>
-                  <li>Update your browser to the latest version</li>
-                </ul>
-              </div>
-              
-              <div className="mt-3 pt-2 border-t border-gray-600">
-                <p className="font-medium">System Information:</p>
-                <pre className="text-xs text-gray-400 mt-1 whitespace-pre-wrap">{browserInfo}</pre>
-              </div>
-            </div>
+
+        {retryCount >= 2 && (
+          <div className="bg-yellow-900/20 border border-yellow-700 rounded p-3 mb-4">
+            <p className="text-yellow-300 text-sm font-medium mb-2">
+              Multiple attempts failed. Try these steps:
+            </p>
+            <ul className="text-yellow-200 text-xs space-y-1">
+              <li>1. Refresh the page completely</li>
+              <li>2. Check browser permissions in settings</li>
+              <li>3. Try a different browser or device</li>
+              <li>4. Run full diagnostics for detailed analysis</li>
+            </ul>
           </div>
         )}
       </div>
@@ -649,6 +617,14 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
             <CheckCircle className="w-4 h-4" />
             <span>Microphone ready</span>
           </div>
+
+          <Button
+            onClick={() => setShowDiagnostics(true)}
+            variant="secondary"
+            size="sm"
+          >
+            <Bug className="w-4 h-4" />
+          </Button>
         </div>
       </div>
     );
@@ -673,6 +649,14 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
             <Volume2 className="w-4 h-4" />
             <span>Click to enable microphone</span>
           </div>
+
+          <Button
+            onClick={() => setShowDiagnostics(true)}
+            variant="secondary"
+            size="sm"
+          >
+            <Bug className="w-4 h-4" />
+          </Button>
         </div>
       </div>
     );
@@ -711,6 +695,14 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
               </div>
             </>
           )}
+
+          <Button
+            onClick={() => setShowDiagnostics(true)}
+            variant="secondary"
+            size="sm"
+          >
+            <Bug className="w-4 h-4" />
+          </Button>
         </div>
       )}
 
