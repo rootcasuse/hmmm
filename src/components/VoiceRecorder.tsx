@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Mic, Square, Play, Pause, Trash2, Send, AlertCircle, Settings, RefreshCw } from 'lucide-react';
+import { Mic, Square, Play, Pause, Trash2, Send, AlertCircle, Settings, RefreshCw, CheckCircle } from 'lucide-react';
 import Button from './ui/Button';
 
 interface VoiceRecorderProps {
@@ -20,6 +20,7 @@ interface PermissionState {
   status: 'unknown' | 'granted' | 'denied' | 'prompt';
   error: string | null;
   isChecking: boolean;
+  lastChecked: number;
 }
 
 interface AudioDeviceInfo {
@@ -44,7 +45,8 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
   const [permissionState, setPermissionState] = useState<PermissionState>({
     status: 'unknown',
     error: null,
-    isChecking: false
+    isChecking: false,
+    lastChecked: 0
   });
 
   const [isPlaying, setIsPlaying] = useState(false);
@@ -53,6 +55,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [showDeviceSettings, setShowDeviceSettings] = useState(false);
   const [supportedMimeTypes, setSupportedMimeTypes] = useState<string[]>([]);
+  const [systemInfo, setSystemInfo] = useState<string>('');
 
   // Refs for managing recording resources
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -60,7 +63,6 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
   const audioChunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<number>();
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
-  const permissionCheckRef = useRef<boolean>(false);
   const initializationRef = useRef<boolean>(false);
 
   // Cleanup function
@@ -96,18 +98,30 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
     }
   }, []);
 
+  // Get system information for debugging
+  const getSystemInfo = useCallback((): string => {
+    const info = [];
+    info.push(`Browser: ${navigator.userAgent}`);
+    info.push(`Protocol: ${location.protocol}`);
+    info.push(`Host: ${location.hostname}`);
+    info.push(`MediaDevices: ${!!navigator.mediaDevices}`);
+    info.push(`getUserMedia: ${!!navigator.mediaDevices?.getUserMedia}`);
+    info.push(`MediaRecorder: ${!!window.MediaRecorder}`);
+    info.push(`WebCrypto: ${!!window.crypto?.subtle}`);
+    return info.join('\n');
+  }, []);
+
   // Get supported MIME types
   const getSupportedMimeTypes = useCallback((): string[] => {
     const types = [
       'audio/webm;codecs=opus',
-      'audio/webm;codecs=vp8,opus',
+      'audio/webm;codecs=vp8,opus', 
       'audio/webm',
       'audio/mp4;codecs=mp4a.40.2',
       'audio/mp4',
       'audio/ogg;codecs=opus',
       'audio/ogg',
-      'audio/wav',
-      'audio/mpeg'
+      'audio/wav'
     ];
     
     return types.filter(type => {
@@ -156,11 +170,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       issues.push('MediaRecorder API not supported');
     }
     
-    if (!window.crypto || !window.crypto.subtle) {
-      issues.push('Web Crypto API not supported');
-    }
-    
-    if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+    if (location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
       issues.push('HTTPS required for microphone access');
     }
     
@@ -179,10 +189,14 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       setIsInitializing(true);
       setPermissionState(prev => ({ ...prev, error: null, isChecking: true }));
 
+      // Get system info for debugging
+      const sysInfo = getSystemInfo();
+      setSystemInfo(sysInfo);
+
       // Check browser compatibility
       const compatibility = checkBrowserCompatibility();
       if (!compatibility.compatible) {
-        throw new Error(`Browser not compatible: ${compatibility.issues.join(', ')}`);
+        throw new Error(`Browser compatibility issues: ${compatibility.issues.join(', ')}`);
       }
 
       // Get supported MIME types
@@ -190,77 +204,160 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       setSupportedMimeTypes(mimeTypes);
 
       if (mimeTypes.length === 0) {
-        throw new Error('No supported audio recording formats found');
+        throw new Error('No supported audio recording formats found in this browser');
       }
 
-      // Get available audio devices
+      // Try to get initial device list (may be limited without permission)
       const devices = await getAudioDevices();
       setAudioDevices(devices);
 
-      // Set default device
+      // Set default device if available
       if (devices.length > 0 && !selectedDeviceId) {
         setSelectedDeviceId(devices[0].deviceId);
       }
 
-      setPermissionState(prev => ({ ...prev, isChecking: false }));
+      setPermissionState(prev => ({ 
+        ...prev, 
+        isChecking: false,
+        lastChecked: Date.now()
+      }));
 
     } catch (error) {
       console.error('Audio system initialization failed:', error);
       setPermissionState({
         status: 'denied',
         error: error instanceof Error ? error.message : 'Audio system initialization failed',
-        isChecking: false
+        isChecking: false,
+        lastChecked: Date.now()
       });
     } finally {
       setIsInitializing(false);
     }
-  }, [checkBrowserCompatibility, getSupportedMimeTypes, getAudioDevices, selectedDeviceId]);
+  }, [checkBrowserCompatibility, getSupportedMimeTypes, getAudioDevices, getSystemInfo, selectedDeviceId]);
 
-  // Check microphone permission
-  const checkMicrophonePermission = useCallback(async (): Promise<void> => {
-    if (permissionCheckRef.current) return;
-    permissionCheckRef.current = true;
+  // Check microphone permission with actual access test
+  const checkMicrophonePermission = useCallback(async (forceCheck: boolean = false): Promise<boolean> => {
+    const now = Date.now();
+    
+    // Don't check too frequently unless forced
+    if (!forceCheck && (now - permissionState.lastChecked) < 5000) {
+      return permissionState.status === 'granted';
+    }
 
     try {
       setPermissionState(prev => ({ ...prev, isChecking: true, error: null }));
 
-      // Check permission API if available
-      if (navigator.permissions) {
+      // First try the Permissions API if available
+      if (navigator.permissions && !forceCheck) {
         try {
           const permission = await navigator.permissions.query({ 
             name: 'microphone' as PermissionName 
           });
           
-          setPermissionState(prev => ({
-            ...prev,
-            status: permission.state as any,
-            isChecking: false
-          }));
-
-          permission.onchange = () => {
-            setPermissionState(prev => ({
-              ...prev,
-              status: permission.state as any
-            }));
-          };
-
-          return;
+          if (permission.state === 'granted') {
+            // Even if permission API says granted, we should test actual access
+            // Fall through to actual access test
+          } else if (permission.state === 'denied') {
+            setPermissionState({
+              status: 'denied',
+              error: 'Microphone access denied. Please allow microphone access in your browser settings.',
+              isChecking: false,
+              lastChecked: now
+            });
+            return false;
+          }
         } catch (permError) {
-          console.log('Permission API not supported, will check on first use');
+          console.log('Permission API not supported or failed, testing direct access');
         }
       }
 
-      setPermissionState(prev => ({ ...prev, status: 'unknown', isChecking: false }));
+      // Test actual microphone access
+      const constraints: MediaStreamConstraints = {
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: { ideal: 44100 },
+          channelCount: { ideal: 1 }
+        }
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      
+      // Verify we got valid audio tracks
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        throw new Error('No audio tracks available');
+      }
+
+      const track = audioTracks[0];
+      if (track.readyState !== 'live') {
+        throw new Error('Microphone not ready');
+      }
+
+      // Success! Clean up test stream
+      stream.getTracks().forEach(track => track.stop());
+      
+      // Update device list now that we have permission
+      const devices = await getAudioDevices();
+      setAudioDevices(devices);
+      
+      // Set default device if we don't have one
+      if (devices.length > 0 && !selectedDeviceId) {
+        setSelectedDeviceId(devices[0].deviceId);
+      }
+
+      setPermissionState({
+        status: 'granted',
+        error: null,
+        isChecking: false,
+        lastChecked: now
+      });
+
+      return true;
 
     } catch (error) {
-      console.error('Permission check failed:', error);
+      console.error('Microphone access test failed:', error);
+      
+      let errorMessage = 'Microphone access failed. ';
+      let status: PermissionState['status'] = 'denied';
+      
+      if (error instanceof Error) {
+        switch (error.name) {
+          case 'NotAllowedError':
+            status = 'denied';
+            errorMessage = 'Microphone access denied. Please click the microphone icon in your browser\'s address bar and allow access, then try again.';
+            break;
+          case 'NotFoundError':
+            errorMessage = 'No microphone found. Please connect a microphone and refresh the page.';
+            break;
+          case 'NotSupportedError':
+            errorMessage = 'Audio recording is not supported in this browser. Please use Chrome, Firefox, Safari, or Edge.';
+            break;
+          case 'NotReadableError':
+            errorMessage = 'Microphone is already in use by another application. Please close other apps using the microphone.';
+            break;
+          case 'OverconstrainedError':
+            errorMessage = 'Microphone does not meet the required specifications. Try a different microphone.';
+            break;
+          case 'SecurityError':
+            errorMessage = 'Microphone access blocked due to security restrictions. Please ensure you\'re using HTTPS.';
+            break;
+          default:
+            errorMessage += error.message || 'Please check your microphone settings and try again.';
+        }
+      }
+      
       setPermissionState({
-        status: 'unknown',
-        error: null,
-        isChecking: false
+        status,
+        error: errorMessage,
+        isChecking: false,
+        lastChecked: now
       });
+      
+      return false;
     }
-  }, []);
+  }, [permissionState.lastChecked, permissionState.status, getAudioDevices, selectedDeviceId]);
 
   // Initialize on mount
   useEffect(() => {
@@ -269,7 +366,8 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
     const initialize = async () => {
       await initializeAudioSystem();
       if (mounted) {
-        await checkMicrophonePermission();
+        // Don't automatically check permission on mount - wait for user interaction
+        console.log('Audio system initialized, waiting for user interaction to check microphone permission');
       }
     };
 
@@ -279,7 +377,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       mounted = false;
       cleanup();
     };
-  }, [initializeAudioSystem, checkMicrophonePermission, cleanup]);
+  }, [initializeAudioSystem, cleanup]);
 
   // Timer effect for recording duration
   useEffect(() => {
@@ -313,111 +411,25 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       return supportedMimeTypes[0];
     }
     
-    // Fallback
+    // Ultimate fallback
     return 'audio/webm';
   }, [supportedMimeTypes]);
 
   /**
-   * Request microphone permission with comprehensive error handling
+   * Request microphone permission with user-friendly flow
    */
   const requestMicrophonePermission = async (): Promise<boolean> => {
-    if (isInitializing || permissionState.isChecking) return false;
-    
-    setPermissionState(prev => ({ ...prev, isChecking: true, error: null }));
-    
-    try {
-      // Get audio constraints
-      const constraints: MediaStreamConstraints = {
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          sampleRate: { ideal: 44100, min: 8000, max: 48000 },
-          channelCount: { ideal: 1 },
-          ...(selectedDeviceId && { deviceId: { exact: selectedDeviceId } })
-        }
-      };
-
-      // Test microphone access
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      
-      // Verify we actually got audio tracks
-      const audioTracks = stream.getAudioTracks();
-      if (audioTracks.length === 0) {
-        throw new Error('No audio tracks available');
-      }
-
-      // Check if tracks are enabled and ready
-      const track = audioTracks[0];
-      if (track.readyState !== 'live') {
-        throw new Error('Microphone not ready');
-      }
-      
-      setPermissionState({
-        status: 'granted',
-        error: null,
-        isChecking: false
-      });
-      
-      // Stop the test stream
-      stream.getTracks().forEach(track => track.stop());
-      
-      // Update device list with labels now that we have permission
-      const devices = await getAudioDevices();
-      setAudioDevices(devices);
-      
-      return true;
-      
-    } catch (error) {
-      console.error('Microphone permission/access failed:', error);
-      
-      let errorMessage = 'Microphone access failed. ';
-      let status: PermissionState['status'] = 'denied';
-      
-      if (error instanceof Error) {
-        switch (error.name) {
-          case 'NotAllowedError':
-            status = 'denied';
-            errorMessage += 'Please allow microphone access in your browser settings and refresh the page.';
-            break;
-          case 'NotFoundError':
-            errorMessage += 'No microphone found. Please connect a microphone and try again.';
-            break;
-          case 'NotSupportedError':
-            errorMessage += 'Audio recording is not supported in this browser.';
-            break;
-          case 'NotReadableError':
-            errorMessage += 'Microphone is already in use by another application.';
-            break;
-          case 'OverconstrainedError':
-            errorMessage += 'Microphone does not meet the required specifications.';
-            break;
-          case 'SecurityError':
-            errorMessage += 'Microphone access blocked due to security restrictions.';
-            break;
-          default:
-            errorMessage += `${error.message || 'Please check your microphone settings.'}`;
-        }
-      }
-      
-      setPermissionState({
-        status,
-        error: errorMessage,
-        isChecking: false
-      });
-      
-      return false;
-    }
+    return await checkMicrophonePermission(true);
   };
 
   /**
-   * Start audio recording with robust error handling
+   * Start audio recording with comprehensive error handling
    */
   const startRecording = async () => {
     // Check permission first
-    if (permissionState.status !== 'granted') {
-      const hasPermission = await requestMicrophonePermission();
-      if (!hasPermission) return;
+    const hasPermission = await checkMicrophonePermission(true);
+    if (!hasPermission) {
+      return;
     }
 
     try {
@@ -431,7 +443,9 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
           autoGainControl: true,
           sampleRate: { ideal: 44100, min: 8000, max: 48000 },
           channelCount: { ideal: 1 },
-          ...(selectedDeviceId && { deviceId: { exact: selectedDeviceId } })
+          ...(selectedDeviceId && selectedDeviceId !== 'default' && { 
+            deviceId: { exact: selectedDeviceId } 
+          })
         }
       };
 
@@ -441,7 +455,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       // Verify stream is valid
       const audioTracks = stream.getAudioTracks();
       if (audioTracks.length === 0 || audioTracks[0].readyState !== 'live') {
-        throw new Error('Invalid audio stream');
+        throw new Error('Invalid audio stream - microphone may be in use by another application');
       }
       
       audioStreamRef.current = stream;
@@ -459,7 +473,11 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
         });
       } catch (mimeError) {
         console.warn('Failed with preferred MIME type, trying default:', mimeError);
-        recorder = new MediaRecorder(stream);
+        try {
+          recorder = new MediaRecorder(stream);
+        } catch (fallbackError) {
+          throw new Error('MediaRecorder not supported with any audio format');
+        }
       }
       
       mediaRecorderRef.current = recorder;
@@ -468,14 +486,19 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       recorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) {
           audioChunksRef.current.push(event.data);
+          console.log(`Audio chunk received: ${event.data.size} bytes`);
         }
       };
 
       recorder.onstop = () => {
+        console.log(`Recording stopped, total chunks: ${audioChunksRef.current.length}`);
+        
         if (audioChunksRef.current.length > 0) {
           const audioBlob = new Blob(audioChunksRef.current, { 
             type: recorder.mimeType || mimeType 
           });
+          
+          console.log(`Final audio blob size: ${audioBlob.size} bytes`);
           
           if (audioBlob.size > 0) {
             const audioUrl = URL.createObjectURL(audioBlob);
@@ -490,9 +513,14 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
           } else {
             setPermissionState(prev => ({
               ...prev,
-              error: 'Recording failed - no audio data captured'
+              error: 'Recording failed - no audio data captured. Please check your microphone.'
             }));
           }
+        } else {
+          setPermissionState(prev => ({
+            ...prev,
+            error: 'Recording failed - no audio data received. Please check your microphone settings.'
+          }));
         }
         
         cleanup();
@@ -502,9 +530,13 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
         console.error('MediaRecorder error:', event);
         setPermissionState(prev => ({
           ...prev,
-          error: 'Recording failed. Please try again.'
+          error: 'Recording failed due to an internal error. Please try again.'
         }));
         stopRecording();
+      };
+
+      recorder.onstart = () => {
+        console.log('Recording started successfully');
       };
 
       // Start recording with data collection interval
@@ -521,9 +553,21 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       
     } catch (error) {
       console.error('Failed to start recording:', error);
+      
+      let errorMessage = 'Failed to start recording. ';
+      if (error instanceof Error) {
+        if (error.message.includes('Invalid audio stream')) {
+          errorMessage = error.message;
+        } else if (error.message.includes('MediaRecorder not supported')) {
+          errorMessage = error.message;
+        } else {
+          errorMessage += 'Please check your microphone and try again.';
+        }
+      }
+      
       setPermissionState(prev => ({
         ...prev,
-        error: 'Failed to start recording. Please check your microphone and try again.'
+        error: errorMessage
       }));
       cleanup();
     }
@@ -535,6 +579,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
   const stopRecording = () => {
     if (mediaRecorderRef.current) {
       const state = mediaRecorderRef.current.state;
+      console.log(`Stopping recording, current state: ${state}`);
       
       if (state === 'recording' || state === 'paused') {
         try {
@@ -629,23 +674,51 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
    * Retry initialization
    */
   const retryInitialization = async () => {
-    permissionCheckRef.current = false;
     initializationRef.current = false;
-    setPermissionState({ status: 'unknown', error: null, isChecking: false });
+    setPermissionState({ 
+      status: 'unknown', 
+      error: null, 
+      isChecking: false,
+      lastChecked: 0
+    });
     await initializeAudioSystem();
-    await checkMicrophonePermission();
   };
 
-  // Render permission error dialog
+  /**
+   * Open browser settings (best effort)
+   */
+  const openBrowserSettings = () => {
+    // This will vary by browser, but we can provide instructions
+    const userAgent = navigator.userAgent.toLowerCase();
+    let instructions = '';
+    
+    if (userAgent.includes('chrome')) {
+      instructions = 'Click the microphone icon in the address bar, or go to Settings > Privacy and security > Site Settings > Microphone';
+    } else if (userAgent.includes('firefox')) {
+      instructions = 'Click the microphone icon in the address bar, or go to Preferences > Privacy & Security > Permissions > Microphone';
+    } else if (userAgent.includes('safari')) {
+      instructions = 'Go to Safari > Preferences > Websites > Microphone';
+    } else if (userAgent.includes('edge')) {
+      instructions = 'Click the microphone icon in the address bar, or go to Settings > Site permissions > Microphone';
+    } else {
+      instructions = 'Look for a microphone icon in your browser\'s address bar, or check your browser\'s privacy/security settings';
+    }
+    
+    alert(`To enable microphone access:\n\n${instructions}\n\nThen refresh this page and try again.`);
+  };
+
+  // Show permission error with helpful instructions
   if (permissionState.error) {
     return (
       <div className={`bg-red-900/20 border border-red-700 rounded-lg p-4 ${className}`}>
-        <div className="flex items-center space-x-2 mb-2">
+        <div className="flex items-center space-x-2 mb-3">
           <AlertCircle className="w-5 h-5 text-red-400" />
           <span className="text-red-400 font-medium">Audio System Error</span>
         </div>
-        <p className="text-red-300 text-sm mb-3">{permissionState.error}</p>
-        <div className="flex flex-wrap gap-2">
+        
+        <p className="text-red-300 text-sm mb-4">{permissionState.error}</p>
+        
+        <div className="flex flex-wrap gap-2 mb-4">
           <Button
             onClick={requestMicrophonePermission}
             variant="secondary"
@@ -656,6 +729,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
             <Mic className="w-4 h-4 mr-1" />
             {permissionState.isChecking ? 'Checking...' : 'Request Permission'}
           </Button>
+          
           <Button
             onClick={retryInitialization}
             variant="secondary"
@@ -666,8 +740,9 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
             <RefreshCw className="w-4 h-4 mr-1" />
             Retry
           </Button>
+          
           <Button
-            onClick={() => setShowDeviceSettings(!showDeviceSettings)}
+            onClick={openBrowserSettings}
             variant="secondary"
             size="sm"
           >
@@ -676,34 +751,118 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
           </Button>
         </div>
         
-        {showDeviceSettings && (
-          <div className="mt-4 p-3 bg-gray-800 rounded border border-gray-600">
-            <h4 className="text-sm font-medium text-white mb-2">Audio Devices</h4>
-            {audioDevices.length > 0 ? (
-              <select
-                value={selectedDeviceId}
-                onChange={(e) => setSelectedDeviceId(e.target.value)}
-                className="w-full p-2 bg-gray-700 border border-gray-600 rounded text-white text-sm"
-              >
-                {audioDevices.map(device => (
-                  <option key={device.deviceId} value={device.deviceId}>
-                    {device.label}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <p className="text-gray-400 text-sm">No audio devices found</p>
-            )}
-            
-            <div className="mt-2">
-              <h5 className="text-xs font-medium text-gray-300 mb-1">Supported Formats</h5>
-              <div className="text-xs text-gray-400">
-                {supportedMimeTypes.length > 0 
-                  ? supportedMimeTypes.join(', ')
-                  : 'No supported formats found'
-                }
-              </div>
+        {/* Troubleshooting section */}
+        <details className="mt-4">
+          <summary className="text-sm text-gray-400 cursor-pointer hover:text-white">
+            Troubleshooting Steps
+          </summary>
+          <div className="mt-2 p-3 bg-gray-800 rounded border border-gray-600 text-xs text-gray-300">
+            <div className="space-y-2">
+              <p><strong>1. Check browser permissions:</strong></p>
+              <ul className="list-disc list-inside ml-4 space-y-1">
+                <li>Look for a microphone icon in the address bar</li>
+                <li>Click it and select "Allow"</li>
+                <li>Refresh the page after changing permissions</li>
+              </ul>
+              
+              <p><strong>2. Check system settings:</strong></p>
+              <ul className="list-disc list-inside ml-4 space-y-1">
+                <li>Ensure your microphone is connected and working</li>
+                <li>Check that no other apps are using the microphone</li>
+                <li>Try a different microphone if available</li>
+              </ul>
+              
+              <p><strong>3. Browser requirements:</strong></p>
+              <ul className="list-disc list-inside ml-4 space-y-1">
+                <li>Use Chrome, Firefox, Safari, or Edge</li>
+                <li>Ensure you're on HTTPS (secure connection)</li>
+                <li>Update your browser to the latest version</li>
+              </ul>
             </div>
+            
+            {showDeviceSettings && (
+              <div className="mt-4 pt-3 border-t border-gray-600">
+                <p><strong>System Information:</strong></p>
+                <pre className="text-xs text-gray-400 mt-1 whitespace-pre-wrap">{systemInfo}</pre>
+                
+                <p className="mt-2"><strong>Supported Formats:</strong></p>
+                <p className="text-gray-400">
+                  {supportedMimeTypes.length > 0 
+                    ? supportedMimeTypes.join(', ')
+                    : 'No supported formats found'
+                  }
+                </p>
+                
+                <p className="mt-2"><strong>Available Devices:</strong></p>
+                <p className="text-gray-400">
+                  {audioDevices.length > 0 
+                    ? audioDevices.map(d => d.label).join(', ')
+                    : 'No devices found (may require permission)'
+                  }
+                </p>
+              </div>
+            )}
+          </div>
+        </details>
+        
+        <button
+          onClick={() => setShowDeviceSettings(!showDeviceSettings)}
+          className="text-xs text-gray-400 hover:text-white mt-2"
+        >
+          {showDeviceSettings ? 'Hide' : 'Show'} technical details
+        </button>
+      </div>
+    );
+  }
+
+  // Show permission granted status
+  if (permissionState.status === 'granted' && !recordingState.audioBlob && !recordingState.isRecording) {
+    return (
+      <div className={`space-y-4 ${className}`}>
+        <div className="flex items-center space-x-3">
+          <Button
+            onClick={startRecording}
+            disabled={disabled || isInitializing}
+            isLoading={isInitializing}
+            className="flex items-center space-x-2"
+          >
+            <Mic className="w-4 h-4" />
+            <span>Record Voice Message</span>
+          </Button>
+          
+          <div className="flex items-center space-x-2 text-green-400 text-sm">
+            <CheckCircle className="w-4 h-4" />
+            <span>Microphone ready</span>
+          </div>
+          
+          {audioDevices.length > 1 && (
+            <Button
+              onClick={() => setShowDeviceSettings(!showDeviceSettings)}
+              variant="secondary"
+              size="sm"
+              className="p-2"
+              title="Audio Settings"
+            >
+              <Settings className="w-4 h-4" />
+            </Button>
+          )}
+        </div>
+
+        {/* Device Settings */}
+        {showDeviceSettings && audioDevices.length > 1 && (
+          <div className="bg-gray-800 rounded-lg p-3 border border-gray-700">
+            <h4 className="text-sm font-medium text-white mb-2">Select Microphone</h4>
+            <select
+              value={selectedDeviceId}
+              onChange={(e) => setSelectedDeviceId(e.target.value)}
+              className="w-full p-2 bg-gray-700 border border-gray-600 rounded text-white text-sm"
+            >
+              {audioDevices.map(device => (
+                <option key={device.deviceId} value={device.deviceId}>
+                  {device.label}
+                </option>
+              ))}
+            </select>
           </div>
         )}
       </div>
@@ -747,7 +906,7 @@ const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
             </>
           )}
           
-          {audioDevices.length > 1 && (
+          {audioDevices.length > 1 && permissionState.status === 'granted' && (
             <Button
               onClick={() => setShowDeviceSettings(!showDeviceSettings)}
               variant="secondary"
