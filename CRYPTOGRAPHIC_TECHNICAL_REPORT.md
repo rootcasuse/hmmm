@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-SafeHarbor is a secure web-based communication platform that implements a comprehensive cryptographic architecture using modern Web Crypto API standards. The application provides end-to-end encrypted messaging, digital signatures, PKI-based identity management, and document signing capabilities. This report analyzes the cryptographic implementations, security guarantees, and technical architecture.
+SafeHarbor is a secure web-based communication platform that implements a comprehensive cryptographic architecture using modern Web Crypto API standards. The application provides end-to-end encrypted messaging, digital signatures, PKI-based identity management, and document signing capabilities.
 
 ## 1. Cryptographic Architecture Overview
 
@@ -11,7 +11,7 @@ SafeHarbor is a secure web-based communication platform that implements a compre
 The application implements a multi-layered security architecture consisting of:
 
 1. **Public Key Infrastructure (PKI)** - Self-signed certificate authority for identity management
-2. **Digital Signatures** - ECDSA-based message and document authentication
+2. **Digital Signatures** - ECDSA-based message and document authentication  
 3. **Symmetric Encryption** - AES-GCM for message confidentiality
 4. **Key Exchange** - ECDH for secure key agreement
 5. **Forward Secrecy** - HKDF-based key derivation for ephemeral keys
@@ -32,18 +32,9 @@ The application implements a multi-layered security architecture consisting of:
 
 ### 2.1 Certificate Authority Design
 
-**File:** `src/utils/certificates.ts`
+**File Location:** `src/utils/certificates.ts`
 
-The application implements a session-based, self-signed Certificate Authority:
-
-```typescript
-class CertificateManager {
-  async initializeCA(): Promise<CertificateAuthority> {
-    const keyPair = await this.generateSigningKeyPair();
-    // Creates ephemeral CA with ECDSA P-256 keys
-  }
-}
-```
+The application implements a session-based, self-signed Certificate Authority with ECDSA P-256 keys that creates ephemeral CA certificates valid only for the browser session duration.
 
 **Key Features:**
 - **Algorithm:** ECDSA with P-256 curve
@@ -56,7 +47,7 @@ class CertificateManager {
 ```json
 {
   "id": "cert-timestamp-random",
-  "subject": "username-timestamp",
+  "subject": "username-timestamp", 
   "publicKey": "base64-encoded-ecdsa-public-key",
   "issuer": "safeharbor-ca-timestamp",
   "issuedAt": 1703123456789,
@@ -79,25 +70,11 @@ class CertificateManager {
 
 ## 3. Digital Signature Implementation
 
-### 3.1 Message Signing
+### 3.1 Message Signing Process
 
-**File:** `src/utils/signing.ts`
+**File Location:** `src/utils/signing.ts`
 
-```typescript
-static async signData(data: string, privateKey: CryptoKey): Promise<string> {
-  const signature = await window.crypto.subtle.sign(
-    {
-      name: 'ECDSA',
-      hash: 'SHA-256'
-    },
-    privateKey,
-    dataBuffer
-  );
-  return arrayBufferToBase64(signature);
-}
-```
-
-**Process:**
+The message signing process follows these steps:
 1. Message content is UTF-8 encoded
 2. SHA-256 hash is computed
 3. ECDSA signature is generated using P-256 private key
@@ -109,7 +86,7 @@ The application implements a dual-mode document signing system:
 
 #### 3.2.1 PKI-Based Document Signing
 
-**File:** `src/components/DocumentSigner.tsx`
+**File Location:** `src/components/DocumentSigner.tsx`
 
 - **Algorithm:** ECDSA P-256 with SHA-256
 - **Process:** Document → SHA-256 hash → ECDSA signature
@@ -118,55 +95,18 @@ The application implements a dual-mode document signing system:
 
 #### 3.2.2 Simple HMAC-Based Signing
 
-**File:** `src/utils/simpleSignature.ts`
+**File Location:** `src/utils/simpleSignature.ts`
 
 - **Algorithm:** HMAC-SHA256
 - **Key Management:** Session-generated symmetric key
 - **Process:** Document + metadata → JSON → HMAC signature
 - **Use Case:** Simplified signing without PKI complexity
 
-### 3.3 Signature Verification
-
-```typescript
-static async verifySignature(
-  data: string,
-  signature: string,
-  publicKey: CryptoKey
-): Promise<boolean> {
-  return await window.crypto.subtle.verify(
-    {
-      name: 'ECDSA',
-      hash: 'SHA-256'
-    },
-    publicKey,
-    signatureBuffer,
-    dataBuffer
-  );
-}
-```
-
 ## 4. Encryption and Key Management
 
 ### 4.1 Message Encryption
 
-**File:** `src/context/CryptoContext.tsx`
-
-```typescript
-const encryptMessage = async (message: string): Promise<EncryptedData> => {
-  const key = await window.crypto.subtle.generateKey(
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt']
-  );
-  
-  const iv = window.crypto.getRandomValues(new Uint8Array(12));
-  const encryptedData = await window.crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
-    key,
-    data
-  );
-};
-```
+**File Location:** `src/context/CryptoContext.tsx`
 
 **Encryption Parameters:**
 - **Algorithm:** AES-GCM (Galois/Counter Mode)
@@ -176,28 +116,7 @@ const encryptMessage = async (message: string): Promise<EncryptedData> => {
 
 ### 4.2 Forward Secrecy Implementation
 
-**File:** `src/utils/forwardSecrecy.ts`
-
-```typescript
-static async deriveMessageKey(
-  sharedSecret: CryptoKey,
-  salt: Uint8Array,
-  info: string = 'safeharbor-message'
-): Promise<CryptoKey> {
-  return await window.crypto.subtle.deriveKey(
-    {
-      name: 'HKDF',
-      hash: 'SHA-256',
-      salt,
-      info: new TextEncoder().encode(info)
-    },
-    keyMaterial,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt', 'decrypt']
-  );
-}
-```
+**File Location:** `src/utils/forwardSecrecy.ts`
 
 **Forward Secrecy Features:**
 - **Key Derivation:** HKDF-SHA256 with unique salts
@@ -211,21 +130,6 @@ static async deriveMessageKey(
 
 **Implementation:** Web Crypto API ECDH with P-256 curve
 
-```typescript
-const generateKeyPair = async (): Promise<KeyPair> => {
-  const newKeyPair = await window.crypto.subtle.generateKey(
-    {
-      name: 'ECDH',
-      namedCurve: 'P-256'
-    },
-    false,
-    ['deriveKey']
-  );
-};
-```
-
-### 5.2 Shared Secret Derivation
-
 The application uses ECDH to establish shared secrets between participants:
 
 1. Each participant generates an ECDH key pair
@@ -237,20 +141,7 @@ The application uses ECDH to establish shared secrets between participants:
 
 ### 6.1 Session-Based Validity
 
-**File:** `src/context/CryptoContext.tsx`
-
-```typescript
-// Session timeout check (2 hours of inactivity)
-const sessionTimeout = setInterval(() => {
-  const now = Date.now();
-  const inactiveTime = now - lastActivity;
-  const maxInactiveTime = 2 * 60 * 60 * 1000; // 2 hours
-  
-  if (inactiveTime > maxInactiveTime && sessionActive) {
-    setSessionActive(false);
-  }
-}, 5 * 60 * 1000);
-```
+**File Location:** `src/context/CryptoContext.tsx`
 
 **Security Features:**
 - **Activity Monitoring:** Tracks user interaction events
@@ -260,23 +151,13 @@ const sessionTimeout = setInterval(() => {
 
 ### 6.2 Secure Memory Management
 
-```typescript
-export function secureWipe(data: any): void {
-  if (data && typeof data === 'object') {
-    Object.keys(data).forEach(key => {
-      if (data[key]) {
-        data[key] = null;
-      }
-    });
-  }
-}
-```
+The application implements secure memory cleanup to prevent key material from remaining in memory after use.
 
 ## 7. Audio Message Security
 
 ### 7.1 Audio Encryption
 
-**File:** `src/components/VoiceRecorder.tsx`
+**File Location:** `src/components/VoiceRecorder.tsx`
 
 Audio messages follow the same encryption pipeline as text messages:
 
@@ -287,16 +168,13 @@ Audio messages follow the same encryption pipeline as text messages:
 
 ### 7.2 Audio Codec Support
 
-```typescript
-const SUPPORTED_AUDIO_TYPES = [
-  'audio/webm;codecs=opus',
-  'audio/webm',
-  'audio/mp4',
-  'audio/ogg;codecs=opus',
-  'audio/ogg',
-  'audio/wav'
-];
-```
+Supported audio formats in order of preference:
+- audio/webm;codecs=opus
+- audio/webm
+- audio/mp4
+- audio/ogg;codecs=opus
+- audio/ogg
+- audio/wav
 
 ## 8. Security Analysis and Threat Model
 
@@ -387,7 +265,9 @@ The modular design allows for algorithm upgrades:
 
 ## 12. Conclusion
 
-SafeHarbor implements a robust cryptographic architecture that provides strong security guarantees for secure communication. The use of modern, standardized algorithms through the Web Crypto API ensures both security and interoperability. While there are areas for enhancement, particularly in certificate management and perfect forward secrecy, the current implementation provides a solid foundation for secure messaging with proper attention to key management, session security, and cryptographic best practices.
+SafeHarbor implements a robust cryptographic architecture that provides strong security guarantees for secure communication. The use of modern, standardized algorithms through the Web Crypto API ensures both security and interoperability.
+
+While there are areas for enhancement, particularly in certificate management and perfect forward secrecy, the current implementation provides a solid foundation for secure messaging with proper attention to key management, session security, and cryptographic best practices.
 
 The dual-mode document signing system and comprehensive PKI implementation demonstrate a sophisticated understanding of cryptographic principles and practical security requirements. The session-based security model is well-suited for the application's use case while maintaining strong cryptographic properties.
 
