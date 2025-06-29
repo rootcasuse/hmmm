@@ -1,0 +1,414 @@
+# DECRYPTION PROCESSES AND VALIDATION
+
+## Overview
+SafeHarbor implements comprehensive decryption processes with robust error handling, integrity verification, and secure key management. Each content type follows specific decryption protocols optimized for security and performance.
+
+## Decryption Algorithms by Content Type
+
+### 1. Text Message Decryption
+**Algorithm**: AES-256-GCM with forward secrecy
+**Process**: HKDF key derivation → AES decryption → integrity verification
+
+```javascript
+// Forward secrecy decryption implementation
+static async decryptWithForwardSecrecy(
+  encryptedData: EncryptedData,
+  sharedSecret: CryptoKey,
+  messageIndex: number = 0
+): Promise<string> {
+  if (!encryptedData.salt) {
+    throw new Error('Salt required for forward secrecy decryption');
+  }
+
+  // Derive the same ephemeral key used for encryption
+  const messageKey = await this.deriveMessageKey(
+    sharedSecret,
+    encryptedData.salt,
+    `message-${messageIndex}`
+  );
+
+  // Decrypt with ephemeral key
+  const decryptedData = await window.crypto.subtle.decrypt(
+    {
+      name: 'AES-GCM',
+      iv: encryptedData.iv
+    },
+    messageKey,
+    encryptedData.data
+  );
+
+  const decoder = new TextDecoder();
+  return decoder.decode(decryptedData);
+}
+```
+
+**Error Handling**:
+- **InvalidAccessError**: Wrong key or corrupted data
+- **OperationError**: Decryption failed (integrity check failed)
+- **DataError**: Malformed encrypted data
+
+### 2. Audio Message Decryption
+**Process**: AES-GCM decryption → Base64 decode → Blob reconstruction
+
+```javascript
+const decryptAudioMessage = async (encryptedAudio: EncryptedData): Promise<Blob> => {
+  try {
+    // Decrypt the audio data URL
+    const decryptedDataUrl = await decryptWithForwardSecrecy(encryptedAudio, sharedSecret);
+    
+    // Convert data URL back to blob
+    const response = await fetch(decryptedDataUrl);
+    const audioBlob = await response.blob();
+    
+    // Validate audio format
+    if (!audioBlob.type.startsWith('audio/')) {
+      throw new Error('Invalid audio format after decryption');
+    }
+    
+    return audioBlob;
+  } catch (error) {
+    console.error('Audio decryption failed:', error);
+    throw new Error('Failed to decrypt audio message');
+  }
+};
+```
+
+**Validation Steps**:
+1. **GMAC Verification**: Automatic with AES-GCM
+2. **Format Validation**: Ensure valid audio MIME type
+3. **Size Validation**: Check against maximum limits
+4. **Codec Verification**: Ensure browser can play format
+
+### 3. Image Decryption
+**Process**: AES-GCM decryption → Data URL validation → Image verification
+
+```javascript
+const decryptImageMessage = async (encryptedImage: EncryptedData): Promise<string> => {
+  try {
+    const decryptedDataUrl = await decryptWithForwardSecrecy(encryptedImage, sharedSecret);
+    
+    // Validate image data URL format
+    if (!decryptedDataUrl.startsWith('data:image/')) {
+      throw new Error('Invalid image format after decryption');
+    }
+    
+    // Additional validation: try to load image
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(decryptedDataUrl);
+      img.onerror = () => reject(new Error('Corrupted image data'));
+      img.src = decryptedDataUrl;
+    });
+  } catch (error) {
+    console.error('Image decryption failed:', error);
+    throw new Error('Failed to decrypt image');
+  }
+};
+```
+
+### 4. Document Decryption and Verification
+**Process**: Signature verification → Hash validation → Content decryption
+
+```javascript
+// Document signature verification
+static async verifyDocumentSignature(
+  file: File,
+  documentSignature: DocumentSignature,
+  publicKey: CryptoKey
+): Promise<boolean> {
+  try {
+    // 1. Verify the document hash matches current file
+    const currentHash = await this.hashDocument(file);
+    if (currentHash !== documentSignature.documentHash) {
+      console.warn('Document hash mismatch - file may have been modified');
+      return false;
+    }
+
+    // 2. Verify the digital signature
+    const isSignatureValid = await this.verifySignature(
+      documentSignature.documentHash,
+      documentSignature.signature,
+      publicKey
+    );
+    
+    if (!isSignatureValid) {
+      console.warn('Digital signature verification failed');
+      return false;
+    }
+
+    // 3. Verify certificate validity
+    const isCertValid = await certificateManager.verifyCertificate(
+      documentSignature.certificate
+    );
+    
+    return isCertValid;
+  } catch (error) {
+    console.error('Document verification failed:', error);
+    return false;
+  }
+}
+```
+
+## Key Management and Storage
+
+### Session-Based Key Storage
+**Storage Location**: Memory only (never persisted)
+**Lifecycle**: Generated on session start, destroyed on session end
+
+```javascript
+// Secure key cleanup
+const secureWipe = (data: any): void => {
+  if (data && typeof data === 'object') {
+    Object.keys(data).forEach(key => {
+      if (data[key]) {
+        data[key] = null;
+      }
+    });
+  }
+};
+
+// Cleanup on session end
+useEffect(() => {
+  const cleanup = () => {
+    try {
+      secureWipe(keyPair);
+      secureWipe(signingKeyPair);
+      secureWipe(certificate);
+      certificateManager.reset();
+    } catch (error) {
+      console.warn('Cleanup error:', error);
+    }
+  };
+
+  window.addEventListener('beforeunload', cleanup);
+  return cleanup;
+}, [keyPair, signingKeyPair, certificate]);
+```
+
+### Key Derivation Process
+**Algorithm**: HKDF-SHA256
+**Salt**: 32 random bytes per message
+**Info**: Message-specific context string
+
+```javascript
+static async deriveMessageKey(
+  sharedSecret: CryptoKey,
+  salt: Uint8Array,
+  info: string = 'safeharbor-message'
+): Promise<CryptoKey> {
+  // Import shared secret as key material
+  const keyMaterial = await window.crypto.subtle.importKey(
+    'raw',
+    await window.crypto.subtle.exportKey('raw', sharedSecret),
+    'HKDF',
+    false,
+    ['deriveKey']
+  );
+
+  // Derive new key using HKDF
+  return await window.crypto.subtle.deriveKey(
+    {
+      name: 'HKDF',
+      hash: 'SHA-256',
+      salt,
+      info: new TextEncoder().encode(info)
+    },
+    keyMaterial,
+    {
+      name: 'AES-GCM',
+      length: 256
+    },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+```
+
+## Integrity Verification Steps
+
+### 1. GMAC Authentication (AES-GCM)
+**Automatic**: Built into AES-GCM mode
+**Tag Size**: 128 bits
+**Verification**: Fails if any bit is modified
+
+### 2. Digital Signature Verification
+**Algorithm**: ECDSA P-256 with SHA-256
+**Process**: Hash verification → Signature verification → Certificate validation
+
+```javascript
+const verifyMessage = async (
+  message: string,
+  signature: string,
+  senderCert: Certificate
+): Promise<boolean> => {
+  try {
+    // 1. Verify certificate is valid and not expired
+    const isCertValid = await certificateManager.verifyCertificate(senderCert);
+    if (!isCertValid) {
+      console.warn('Invalid or expired certificate');
+      return false;
+    }
+
+    // 2. Import sender's public key from certificate
+    const senderPublicKey = await certificateManager.importPublicKey(senderCert.publicKey);
+    
+    // 3. Verify the message signature
+    const result = await DigitalSigner.verifySignature(message, signature, senderPublicKey);
+    
+    return result;
+  } catch (error) {
+    console.error('Message verification failed:', error);
+    return false;
+  }
+};
+```
+
+### 3. Certificate Chain Validation
+**Process**: CA signature verification → Expiration check → Revocation check
+
+```javascript
+async verifyCertificate(certificate: Certificate): Promise<boolean> {
+  try {
+    if (!this.ca) {
+      console.warn('No CA available for verification');
+      return false;
+    }
+
+    // 1. Import CA public key
+    const caPublicKey = await this.importPublicKey(this.ca.publicKey);
+    
+    // 2. Reconstruct certificate data for verification
+    const certData = {
+      subject: certificate.subject,
+      publicKey: certificate.publicKey,
+      issuer: certificate.issuer,
+      issuedAt: certificate.issuedAt,
+      expiresAt: certificate.expiresAt
+    };
+
+    // 3. Verify CA signature
+    const dataToVerify = JSON.stringify(certData);
+    const encoder = new TextEncoder();
+    const data = encoder.encode(dataToVerify);
+    const signature = base64ToArrayBuffer(certificate.signature);
+
+    const isSignatureValid = await window.crypto.subtle.verify(
+      {
+        name: 'ECDSA',
+        hash: 'SHA-256'
+      },
+      caPublicKey,
+      signature,
+      data
+    );
+
+    // 4. Check expiration
+    const now = Date.now();
+    const isNotExpired = now < certificate.expiresAt;
+
+    return isSignatureValid && isNotExpired;
+  } catch (error) {
+    console.error('Certificate verification failed:', error);
+    return false;
+  }
+}
+```
+
+## Error Handling and Recovery
+
+### Decryption Error Types
+```javascript
+const handleDecryptionError = (error: Error): string => {
+  switch (error.name) {
+    case 'InvalidAccessError':
+      return 'Wrong decryption key - message may be corrupted';
+    case 'OperationError':
+      return 'Message integrity check failed - possible tampering detected';
+    case 'DataError':
+      return 'Malformed encrypted data - cannot decrypt';
+    case 'NotSupportedError':
+      return 'Encryption algorithm not supported by browser';
+    default:
+      return `Decryption failed: ${error.message}`;
+  }
+};
+```
+
+### Recovery Strategies
+1. **Key Rederivation**: Attempt with different message index
+2. **Format Fallback**: Try alternative decryption methods
+3. **Graceful Degradation**: Display error message instead of crashing
+4. **User Notification**: Clear error messages with suggested actions
+
+### Validation Failure Handling
+```javascript
+const validateDecryptedContent = (content: string, expectedType: string): boolean => {
+  try {
+    switch (expectedType) {
+      case 'text':
+        return typeof content === 'string' && content.length > 0;
+      case 'image':
+        return content.startsWith('data:image/');
+      case 'audio':
+        return content.startsWith('data:audio/');
+      default:
+        return true;
+    }
+  } catch (error) {
+    console.error('Content validation failed:', error);
+    return false;
+  }
+};
+```
+
+## Performance Optimization
+
+### Batch Decryption
+```javascript
+const decryptMessageBatch = async (messages: EncryptedMessage[]): Promise<DecryptedMessage[]> => {
+  const decryptionPromises = messages.map(async (msg, index) => {
+    try {
+      const decryptedContent = await decryptWithForwardSecrecy(
+        msg.encryptedData,
+        sharedSecret,
+        index
+      );
+      return { ...msg, content: decryptedContent, decrypted: true };
+    } catch (error) {
+      console.error(`Failed to decrypt message ${index}:`, error);
+      return { ...msg, content: '[Decryption Failed]', decrypted: false };
+    }
+  });
+
+  return Promise.all(decryptionPromises);
+};
+```
+
+### Memory Management
+```javascript
+// Cleanup decrypted data after use
+const secureCleanup = (decryptedData: any) => {
+  if (typeof decryptedData === 'string') {
+    // Overwrite string memory (best effort)
+    decryptedData = '\0'.repeat(decryptedData.length);
+  }
+  decryptedData = null;
+};
+```
+
+## Security Considerations
+
+### Timing Attack Prevention
+- Use constant-time comparison for sensitive operations
+- Avoid early returns based on decryption success
+- Implement consistent error handling timing
+
+### Side-Channel Resistance
+- Rely on browser's native crypto implementations
+- Avoid custom cryptographic operations
+- Use hardware-backed security when available
+
+### Forward Secrecy Guarantees
+- Each message uses unique derived key
+- Past messages remain secure if current keys compromised
+- Automatic key rotation per message

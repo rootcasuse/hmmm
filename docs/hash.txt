@@ -1,0 +1,426 @@
+# HASH FUNCTIONS AND INTEGRITY VERIFICATION
+
+## Overview
+SafeHarbor employs multiple hash functions for different security purposes including data integrity, digital signatures, key derivation, and content verification. The system prioritizes SHA-256 for universal compatibility while supporting advanced alternatives.
+
+## Hash Function Implementations
+
+### 1. SHA-256 (Primary Hash Function)
+**Use Cases**: Digital signatures, document hashing, key derivation, general integrity
+**Output Size**: 256 bits (32 bytes)
+**Security Level**: 128-bit collision resistance
+**Performance**: Hardware accelerated on modern processors
+
+```javascript
+// Document hashing implementation
+static async hashDocument(file: File): Promise<string> {
+  const arrayBuffer = await file.arrayBuffer();
+  const hashBuffer = await window.crypto.subtle.digest('SHA-256', arrayBuffer);
+  return arrayBufferToBase64(hashBuffer);
+}
+
+// Message hashing for signatures
+const hashMessage = async (message: string): Promise<ArrayBuffer> => {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(message);
+  return await window.crypto.subtle.digest('SHA-256', data);
+};
+```
+
+**Content Type Specifications**:
+
+### Text Messages
+- **Hash Function**: SHA-256
+- **Input**: UTF-8 encoded message content
+- **Purpose**: Digital signature generation
+- **Implementation**: Automatic in ECDSA signing process
+
+```javascript
+// Text message signing with SHA-256
+static async signData(data: string, privateKey: CryptoKey): Promise<string> {
+  const encoder = new TextEncoder();
+  const dataBuffer = encoder.encode(data);
+
+  // SHA-256 is automatically used by ECDSA
+  const signature = await window.crypto.subtle.sign(
+    {
+      name: 'ECDSA',
+      hash: 'SHA-256'  // Explicit SHA-256 specification
+    },
+    privateKey,
+    dataBuffer
+  );
+
+  return arrayBufferToBase64(signature);
+}
+```
+
+### Audio Files
+- **Hash Function**: SHA-256
+- **Input**: Complete audio blob binary data
+- **Purpose**: Integrity verification and signature
+- **Process**: Blob → ArrayBuffer → SHA-256 → Base64
+
+```javascript
+const hashAudioBlob = async (audioBlob: Blob): Promise<string> => {
+  const arrayBuffer = await audioBlob.arrayBuffer();
+  const hashBuffer = await window.crypto.subtle.digest('SHA-256', arrayBuffer);
+  return arrayBufferToBase64(hashBuffer);
+};
+```
+
+### Images
+- **Hash Function**: SHA-256
+- **Input**: Complete image data (including metadata)
+- **Purpose**: Tamper detection and verification
+- **Process**: Data URL → Binary → SHA-256
+
+```javascript
+const hashImageData = async (imageDataUrl: string): Promise<string> => {
+  // Convert data URL to binary
+  const response = await fetch(imageDataUrl);
+  const arrayBuffer = await response.arrayBuffer();
+  
+  const hashBuffer = await window.crypto.subtle.digest('SHA-256', arrayBuffer);
+  return arrayBufferToBase64(hashBuffer);
+};
+```
+
+### Documents
+- **Hash Function**: SHA-256
+- **Input**: Complete file content including metadata
+- **Purpose**: Digital signature and integrity verification
+- **Metadata Included**: Filename, size, type, timestamp
+
+```javascript
+// Complete document hashing with metadata
+const hashDocumentWithMetadata = async (file: File): Promise<string> => {
+  const fileContent = await file.arrayBuffer();
+  
+  // Include metadata in hash
+  const metadata = {
+    name: file.name,
+    size: file.size,
+    type: file.type,
+    lastModified: file.lastModified
+  };
+  
+  const metadataString = JSON.stringify(metadata);
+  const metadataBuffer = new TextEncoder().encode(metadataString);
+  
+  // Combine file content and metadata
+  const combinedBuffer = new Uint8Array(fileContent.byteLength + metadataBuffer.byteLength);
+  combinedBuffer.set(new Uint8Array(fileContent), 0);
+  combinedBuffer.set(metadataBuffer, fileContent.byteLength);
+  
+  const hashBuffer = await window.crypto.subtle.digest('SHA-256', combinedBuffer);
+  return arrayBufferToBase64(hashBuffer);
+};
+```
+
+## Alternative Hash Functions
+
+### 2. SHA-3 (Keccak)
+**Status**: Future implementation planned
+**Advantages**: Different mathematical foundation from SHA-2
+**Use Case**: Additional security layer for critical operations
+
+```javascript
+// SHA-3 implementation (when browser support improves)
+const sha3Hash = async (data: ArrayBuffer): Promise<string> => {
+  // Note: Limited browser support as of 2024
+  if ('SHA-3' in window.crypto.subtle) {
+    const hashBuffer = await window.crypto.subtle.digest('SHA-3-256', data);
+    return arrayBufferToBase64(hashBuffer);
+  }
+  throw new Error('SHA-3 not supported in this browser');
+};
+```
+
+### 3. BLAKE2 
+**Status**: Not natively supported, would require WebAssembly
+**Advantages**: Faster than SHA-256, cryptographically secure
+**Limitation**: No native browser support
+
+## Collision Resistance Analysis
+
+### SHA-256 Security Properties
+- **Collision Resistance**: 2^128 operations required
+- **Preimage Resistance**: 2^256 operations required  
+- **Second Preimage Resistance**: 2^256 operations required
+- **Avalanche Effect**: 50% bit change for 1-bit input change
+
+### Collision Resistance Testing
+```javascript
+// Collision detection (theoretical - not practical to test)
+const detectCollision = async (data1: string, data2: string): Promise<boolean> => {
+  if (data1 === data2) return false; // Same input, not a collision
+  
+  const hash1 = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(data1));
+  const hash2 = await window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(data2));
+  
+  return arrayBufferToBase64(hash1) === arrayBufferToBase64(hash2);
+};
+```
+
+## Performance Metrics
+
+### Hash Function Performance (Typical Browser)
+- **SHA-256**: ~50-100 MB/s (software), ~500+ MB/s (hardware accelerated)
+- **File Hashing**: ~10ms for 1MB file
+- **Message Hashing**: <1ms for typical text messages
+- **Memory Usage**: Minimal (streaming hash computation)
+
+### Performance Comparison
+```javascript
+// Performance benchmarking
+const benchmarkHashPerformance = async (data: ArrayBuffer): Promise<{
+  sha256Time: number;
+  throughput: number;
+}> => {
+  const startTime = performance.now();
+  
+  await window.crypto.subtle.digest('SHA-256', data);
+  
+  const endTime = performance.now();
+  const duration = endTime - startTime;
+  const throughput = (data.byteLength / 1024 / 1024) / (duration / 1000); // MB/s
+  
+  return {
+    sha256Time: duration,
+    throughput
+  };
+};
+```
+
+## Hash Chaining Implementation
+
+### Message Chain Integrity
+```javascript
+class MessageChain {
+  private previousHash: string = '';
+  
+  async addMessage(message: string): Promise<string> {
+    // Chain current message with previous hash
+    const chainedInput = this.previousHash + message;
+    const encoder = new TextEncoder();
+    const data = encoder.encode(chainedInput);
+    
+    const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
+    const currentHash = arrayBufferToBase64(hashBuffer);
+    
+    this.previousHash = currentHash;
+    return currentHash;
+  }
+  
+  async verifyChain(messages: string[], hashes: string[]): Promise<boolean> {
+    let computedHash = '';
+    
+    for (let i = 0; i < messages.length; i++) {
+      const chainedInput = computedHash + messages[i];
+      const encoder = new TextEncoder();
+      const data = encoder.encode(chainedInput);
+      
+      const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
+      computedHash = arrayBufferToBase64(hashBuffer);
+      
+      if (computedHash !== hashes[i]) {
+        return false; // Chain integrity broken
+      }
+    }
+    
+    return true;
+  }
+}
+```
+
+## Merkle Tree Implementation
+
+### Binary Merkle Tree for Batch Verification
+```javascript
+class MerkleTree {
+  private leaves: string[] = [];
+  private tree: string[][] = [];
+  
+  async buildTree(data: string[]): Promise<string> {
+    // Hash all leaf nodes
+    this.leaves = await Promise.all(
+      data.map(async (item) => {
+        const encoder = new TextEncoder();
+        const buffer = encoder.encode(item);
+        const hashBuffer = await window.crypto.subtle.digest('SHA-256', buffer);
+        return arrayBufferToBase64(hashBuffer);
+      })
+    );
+    
+    this.tree = [this.leaves];
+    
+    // Build tree bottom-up
+    let currentLevel = this.leaves;
+    while (currentLevel.length > 1) {
+      const nextLevel: string[] = [];
+      
+      for (let i = 0; i < currentLevel.length; i += 2) {
+        const left = currentLevel[i];
+        const right = currentLevel[i + 1] || left; // Handle odd number of nodes
+        
+        const combined = left + right;
+        const encoder = new TextEncoder();
+        const buffer = encoder.encode(combined);
+        const hashBuffer = await window.crypto.subtle.digest('SHA-256', buffer);
+        nextLevel.push(arrayBufferToBase64(hashBuffer));
+      }
+      
+      this.tree.push(nextLevel);
+      currentLevel = nextLevel;
+    }
+    
+    return currentLevel[0]; // Root hash
+  }
+  
+  getMerkleProof(index: number): string[] {
+    const proof: string[] = [];
+    let currentIndex = index;
+    
+    for (let level = 0; level < this.tree.length - 1; level++) {
+      const isRightNode = currentIndex % 2 === 1;
+      const siblingIndex = isRightNode ? currentIndex - 1 : currentIndex + 1;
+      
+      if (siblingIndex < this.tree[level].length) {
+        proof.push(this.tree[level][siblingIndex]);
+      }
+      
+      currentIndex = Math.floor(currentIndex / 2);
+    }
+    
+    return proof;
+  }
+  
+  async verifyProof(data: string, proof: string[], rootHash: string, index: number): Promise<boolean> {
+    // Hash the data
+    const encoder = new TextEncoder();
+    const buffer = encoder.encode(data);
+    const hashBuffer = await window.crypto.subtle.digest('SHA-256', buffer);
+    let currentHash = arrayBufferToBase64(hashBuffer);
+    
+    let currentIndex = index;
+    
+    for (const proofHash of proof) {
+      const isRightNode = currentIndex % 2 === 1;
+      const combined = isRightNode ? proofHash + currentHash : currentHash + proofHash;
+      
+      const combinedBuffer = encoder.encode(combined);
+      const newHashBuffer = await window.crypto.subtle.digest('SHA-256', combinedBuffer);
+      currentHash = arrayBufferToBase64(newHashBuffer);
+      
+      currentIndex = Math.floor(currentIndex / 2);
+    }
+    
+    return currentHash === rootHash;
+  }
+}
+```
+
+## Verification Examples
+
+### Document Integrity Verification
+```javascript
+const verifyDocumentIntegrity = async (
+  originalFile: File,
+  receivedFile: File
+): Promise<{
+  isValid: boolean;
+  originalHash: string;
+  receivedHash: string;
+}> => {
+  const originalHash = await hashDocument(originalFile);
+  const receivedHash = await hashDocument(receivedFile);
+  
+  return {
+    isValid: originalHash === receivedHash,
+    originalHash,
+    receivedHash
+  };
+};
+```
+
+### Message Chain Verification
+```javascript
+const verifyMessageChain = async (
+  messages: Array<{content: string, hash: string, previousHash: string}>
+): Promise<boolean> => {
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    const expectedPreviousHash = i > 0 ? messages[i - 1].hash : '';
+    
+    if (message.previousHash !== expectedPreviousHash) {
+      console.error(`Chain broken at message ${i}: previous hash mismatch`);
+      return false;
+    }
+    
+    // Verify current message hash
+    const chainedInput = message.previousHash + message.content;
+    const encoder = new TextEncoder();
+    const data = encoder.encode(chainedInput);
+    const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
+    const computedHash = arrayBufferToBase64(hashBuffer);
+    
+    if (computedHash !== message.hash) {
+      console.error(`Chain broken at message ${i}: hash mismatch`);
+      return false;
+    }
+  }
+  
+  return true;
+};
+```
+
+### Batch Hash Verification
+```javascript
+const verifyBatchHashes = async (
+  items: Array<{data: string, expectedHash: string}>
+): Promise<Array<{index: number, valid: boolean}>> => {
+  const results = await Promise.all(
+    items.map(async (item, index) => {
+      const encoder = new TextEncoder();
+      const buffer = encoder.encode(item.data);
+      const hashBuffer = await window.crypto.subtle.digest('SHA-256', buffer);
+      const computedHash = arrayBufferToBase64(hashBuffer);
+      
+      return {
+        index,
+        valid: computedHash === item.expectedHash
+      };
+    })
+  );
+  
+  return results;
+};
+```
+
+## Security Considerations
+
+### Hash Function Selection Criteria
+1. **Cryptographic Security**: Resistance to known attacks
+2. **Performance**: Suitable for real-time operations
+3. **Browser Support**: Universal availability
+4. **Standardization**: NIST/FIPS approved
+5. **Future-Proofing**: Quantum resistance considerations
+
+### Implementation Security
+- **Constant-Time Operations**: Use browser's native implementations
+- **Side-Channel Resistance**: Avoid custom hash implementations
+- **Memory Safety**: Automatic garbage collection of hash operations
+- **Input Validation**: Sanitize inputs before hashing
+
+### Hash Collision Handling
+```javascript
+const handleHashCollision = (hash1: string, hash2: string, data1: any, data2: any) => {
+  if (hash1 === hash2 && data1 !== data2) {
+    // Theoretical collision detected
+    console.error('CRITICAL: Hash collision detected!');
+    // In practice, this should never happen with SHA-256
+    throw new Error('Hash collision detected - cryptographic failure');
+  }
+};
+```

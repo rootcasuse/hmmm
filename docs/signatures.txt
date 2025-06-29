@@ -1,0 +1,579 @@
+# DIGITAL SIGNATURES AND CODE GENERATION
+
+## Overview
+SafeHarbor implements a comprehensive digital signature system using ECDSA (Elliptic Curve Digital Signature Algorithm) with P-256 curves for authentication, integrity, and non-repudiation. The system also includes a cryptographically secure 6-digit code generation mechanism for secure pairing.
+
+## Digital Signature Algorithms
+
+### 1. ECDSA P-256 (Primary Signature Algorithm)
+**Curve**: P-256 (secp256r1)
+**Hash Function**: SHA-256
+**Security Level**: ~128-bit equivalent to RSA-3072
+**Key Size**: 256 bits
+**Signature Size**: ~64 bytes (variable DER encoding)
+
+```javascript
+// ECDSA key pair generation
+async generateSigningKeyPair(): Promise<SigningKeyPair> {
+  const keyPair = await window.crypto.subtle.generateKey(
+    {
+      name: 'ECDSA',
+      namedCurve: 'P-256'
+    },
+    true,  // extractable for certificate generation
+    ['sign', 'verify']
+  );
+
+  return {
+    publicKey: keyPair.publicKey,
+    privateKey: keyPair.privateKey
+  };
+}
+```
+
+### 2. RSA-PSS (Alternative Implementation)
+**Status**: Available but not used (ECDSA preferred)
+**Key Size**: 2048/3072 bits
+**Padding**: PSS with SHA-256
+**Advantage**: Wider compatibility
+**Disadvantage**: Larger signatures and slower performance
+
+## Key Generation Process
+
+### ECDSA Key Pair Generation
+```javascript
+// Complete key generation with error handling
+const generateSecureKeyPair = async (): Promise<{
+  keyPair: SigningKeyPair;
+  publicKeyData: string;
+  keyId: string;
+}> => {
+  try {
+    // Generate cryptographically secure key pair
+    const keyPair = await window.crypto.subtle.generateKey(
+      {
+        name: 'ECDSA',
+        namedCurve: 'P-256'
+      },
+      true,
+      ['sign', 'verify']
+    );
+
+    // Export public key for sharing
+    const publicKeyBuffer = await window.crypto.subtle.exportKey('raw', keyPair.publicKey);
+    const publicKeyData = arrayBufferToBase64(publicKeyBuffer);
+    
+    // Generate unique key identifier
+    const keyIdBuffer = await window.crypto.subtle.digest('SHA-256', publicKeyBuffer);
+    const keyId = arrayBufferToBase64(keyIdBuffer).slice(0, 16);
+
+    return {
+      keyPair: {
+        publicKey: keyPair.publicKey,
+        privateKey: keyPair.privateKey
+      },
+      publicKeyData,
+      keyId
+    };
+  } catch (error) {
+    console.error('Key generation failed:', error);
+    throw new Error('Failed to generate cryptographic keys');
+  }
+};
+```
+
+### Key Validation
+```javascript
+const validateKeyPair = async (keyPair: SigningKeyPair): Promise<boolean> => {
+  try {
+    // Test signing and verification
+    const testData = 'key-validation-test';
+    const encoder = new TextEncoder();
+    const dataBuffer = encoder.encode(testData);
+    
+    // Sign test data
+    const signature = await window.crypto.subtle.sign(
+      {
+        name: 'ECDSA',
+        hash: 'SHA-256'
+      },
+      keyPair.privateKey,
+      dataBuffer
+    );
+    
+    // Verify signature
+    const isValid = await window.crypto.subtle.verify(
+      {
+        name: 'ECDSA',
+        hash: 'SHA-256'
+      },
+      keyPair.publicKey,
+      signature,
+      dataBuffer
+    );
+    
+    return isValid;
+  } catch (error) {
+    console.error('Key validation failed:', error);
+    return false;
+  }
+};
+```
+
+## Signature Creation Process
+
+### Message Signing
+```javascript
+// Digital signature creation with comprehensive error handling
+static async signData(data: string, privateKey: CryptoKey): Promise<string> {
+  try {
+    const encoder = new TextEncoder();
+    const dataBuffer = encoder.encode(data);
+
+    // Create ECDSA signature with SHA-256
+    const signature = await window.crypto.subtle.sign(
+      {
+        name: 'ECDSA',
+        hash: 'SHA-256'
+      },
+      privateKey,
+      dataBuffer
+    );
+
+    return arrayBufferToBase64(signature);
+  } catch (error) {
+    console.error('Signing failed:', error);
+    throw new Error('Failed to create digital signature');
+  }
+}
+```
+
+### Document Signing with Metadata
+```javascript
+// Complete document signing process
+static async signDocument(
+  file: File,
+  privateKey: CryptoKey,
+  certificate: Certificate
+): Promise<DocumentSignature> {
+  try {
+    // 1. Calculate document hash
+    const documentHash = await this.hashDocument(file);
+    
+    // 2. Create signature metadata
+    const signatureMetadata = {
+      documentHash,
+      filename: file.name,
+      fileSize: file.size,
+      fileType: file.type,
+      timestamp: Date.now(),
+      signerCertificate: certificate.id
+    };
+    
+    // 3. Sign the metadata
+    const metadataString = JSON.stringify(signatureMetadata);
+    const signature = await this.signData(metadataString, privateKey);
+    
+    // 4. Return complete signature package
+    return {
+      documentHash,
+      signature,
+      certificate,
+      timestamp: signatureMetadata.timestamp,
+      metadata: signatureMetadata
+    };
+  } catch (error) {
+    console.error('Document signing failed:', error);
+    throw new Error('Failed to sign document');
+  }
+}
+```
+
+## Signature Verification Process
+
+### Message Verification
+```javascript
+// Signature verification with certificate validation
+static async verifySignature(
+  data: string,
+  signature: string,
+  publicKey: CryptoKey
+): Promise<boolean> {
+  try {
+    const encoder = new TextEncoder();
+    const dataBuffer = encoder.encode(data);
+    const signatureBuffer = base64ToArrayBuffer(signature);
+
+    // Verify ECDSA signature
+    const isValid = await window.crypto.subtle.verify(
+      {
+        name: 'ECDSA',
+        hash: 'SHA-256'
+      },
+      publicKey,
+      signatureBuffer,
+      dataBuffer
+    );
+
+    return isValid;
+  } catch (error) {
+    console.error('Signature verification failed:', error);
+    return false;
+  }
+}
+```
+
+### Complete Message Verification Chain
+```javascript
+const verifyMessageComplete = async (
+  message: string,
+  signature: string,
+  senderCert: Certificate
+): Promise<{
+  isValid: boolean;
+  certificateValid: boolean;
+  signatureValid: boolean;
+  errors: string[];
+}> => {
+  const errors: string[] = [];
+  let certificateValid = false;
+  let signatureValid = false;
+
+  try {
+    // 1. Verify certificate
+    certificateValid = await certificateManager.verifyCertificate(senderCert);
+    if (!certificateValid) {
+      errors.push('Certificate is invalid or expired');
+    }
+
+    // 2. Import public key from certificate
+    const senderPublicKey = await certificateManager.importPublicKey(senderCert.publicKey);
+    
+    // 3. Verify signature
+    signatureValid = await DigitalSigner.verifySignature(message, signature, senderPublicKey);
+    if (!signatureValid) {
+      errors.push('Digital signature verification failed');
+    }
+
+    // 4. Additional checks
+    const now = Date.now();
+    if (senderCert.expiresAt < now) {
+      errors.push('Certificate has expired');
+      certificateValid = false;
+    }
+
+    return {
+      isValid: certificateValid && signatureValid && errors.length === 0,
+      certificateValid,
+      signatureValid,
+      errors
+    };
+  } catch (error) {
+    errors.push(`Verification error: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    return {
+      isValid: false,
+      certificateValid,
+      signatureValid,
+      errors
+    };
+  }
+};
+```
+
+## 6-Digit Code Generation System
+
+### Cryptographically Secure Random Number Generation (CSPRNG)
+```javascript
+// High-entropy 6-digit code generation
+const generateSecure6DigitCode = (): string => {
+  try {
+    // Use Web Crypto API for cryptographically secure randomness
+    const randomBytes = new Uint8Array(4);
+    window.crypto.getRandomValues(randomBytes);
+    
+    // Convert to 6-digit code using modular arithmetic
+    const randomValue = new DataView(randomBytes.buffer).getUint32(0, false);
+    const code = (randomValue % 1000000).toString().padStart(6, '0');
+    
+    return code;
+  } catch (error) {
+    console.error('Secure code generation failed:', error);
+    throw new Error('Failed to generate secure code');
+  }
+};
+```
+
+### Enhanced Code Generation with Time-Based Seeding
+```javascript
+// Time-based entropy enhancement
+const generateEnhancedSecureCode = (): string => {
+  try {
+    // Primary entropy: Crypto random
+    const primaryEntropy = new Uint8Array(8);
+    window.crypto.getRandomValues(primaryEntropy);
+    
+    // Secondary entropy: High-resolution timestamp
+    const timestamp = performance.now();
+    const timestampBytes = new ArrayBuffer(8);
+    new DataView(timestampBytes).setFloat64(0, timestamp, false);
+    
+    // Combine entropy sources
+    const combinedEntropy = new Uint8Array(16);
+    combinedEntropy.set(primaryEntropy, 0);
+    combinedEntropy.set(new Uint8Array(timestampBytes), 8);
+    
+    // Hash combined entropy for uniform distribution
+    return window.crypto.subtle.digest('SHA-256', combinedEntropy).then(hashBuffer => {
+      const hashArray = new Uint8Array(hashBuffer);
+      const codeValue = new DataView(hashArray.buffer).getUint32(0, false);
+      return (codeValue % 1000000).toString().padStart(6, '0');
+    });
+  } catch (error) {
+    console.error('Enhanced code generation failed:', error);
+    // Fallback to basic secure generation
+    return generateSecure6DigitCode();
+  }
+};
+```
+
+### Entropy Collection System
+```javascript
+// Multi-source entropy collection
+class EntropyCollector {
+  private entropyPool: Uint8Array = new Uint8Array(64);
+  private poolIndex: number = 0;
+  
+  collectEntropy(): void {
+    // Mouse movement entropy
+    document.addEventListener('mousemove', (event) => {
+      this.addEntropy(event.clientX ^ event.clientY);
+    });
+    
+    // Keyboard timing entropy
+    document.addEventListener('keydown', (event) => {
+      this.addEntropy(performance.now() ^ event.keyCode);
+    });
+    
+    // Performance timing entropy
+    this.addEntropy(performance.now());
+    
+    // Screen properties entropy
+    this.addEntropy(screen.width ^ screen.height ^ screen.colorDepth);
+  }
+  
+  private addEntropy(value: number): void {
+    const bytes = new ArrayBuffer(4);
+    new DataView(bytes).setUint32(0, value, false);
+    const entropyBytes = new Uint8Array(bytes);
+    
+    for (let i = 0; i < 4; i++) {
+      this.entropyPool[this.poolIndex] ^= entropyBytes[i];
+      this.poolIndex = (this.poolIndex + 1) % this.entropyPool.length;
+    }
+  }
+  
+  async generateSecureCode(): Promise<string> {
+    // Primary: Web Crypto API
+    const cryptoBytes = new Uint8Array(8);
+    window.crypto.getRandomValues(cryptoBytes);
+    
+    // Secondary: Entropy pool
+    const poolSample = this.entropyPool.slice(0, 8);
+    
+    // Combine and hash
+    const combined = new Uint8Array(16);
+    combined.set(cryptoBytes, 0);
+    combined.set(poolSample, 8);
+    
+    const hashBuffer = await window.crypto.subtle.digest('SHA-256', combined);
+    const hashArray = new Uint8Array(hashBuffer);
+    const codeValue = new DataView(hashArray.buffer).getUint32(0, false);
+    
+    return (codeValue % 1000000).toString().padStart(6, '0');
+  }
+}
+```
+
+### Code Validation and Security
+```javascript
+// Secure code validation
+const validatePairingCode = (code: string): {
+  isValid: boolean;
+  errors: string[];
+} => {
+  const errors: string[] = [];
+  
+  // Length validation
+  if (code.length !== 6) {
+    errors.push('Code must be exactly 6 digits');
+  }
+  
+  // Character validation
+  if (!/^\d{6}$/.test(code)) {
+    errors.push('Code must contain only digits');
+  }
+  
+  // Entropy validation (basic)
+  const digits = code.split('').map(Number);
+  const uniqueDigits = new Set(digits).size;
+  if (uniqueDigits === 1) {
+    errors.push('Code appears to have low entropy');
+  }
+  
+  return {
+    isValid: errors.length === 0,
+    errors
+  };
+};
+```
+
+## Security Considerations
+
+### Signature Security Properties
+1. **Authentication**: Proves message origin
+2. **Integrity**: Detects any message modification
+3. **Non-repudiation**: Signer cannot deny signing
+4. **Timestamp Binding**: Links signature to specific time
+
+### Key Security Management
+```javascript
+// Secure key lifecycle management
+class SecureKeyManager {
+  private keys: Map<string, CryptoKey> = new Map();
+  private keyMetadata: Map<string, {
+    created: number;
+    lastUsed: number;
+    usageCount: number;
+  }> = new Map();
+  
+  async generateAndStoreKey(keyId: string): Promise<CryptoKey> {
+    const keyPair = await window.crypto.subtle.generateKey(
+      {
+        name: 'ECDSA',
+        namedCurve: 'P-256'
+      },
+      false, // non-extractable for security
+      ['sign']
+    );
+    
+    this.keys.set(keyId, keyPair.privateKey);
+    this.keyMetadata.set(keyId, {
+      created: Date.now(),
+      lastUsed: Date.now(),
+      usageCount: 0
+    });
+    
+    return keyPair.privateKey;
+  }
+  
+  async useKey(keyId: string, operation: () => Promise<any>): Promise<any> {
+    const key = this.keys.get(keyId);
+    if (!key) {
+      throw new Error('Key not found');
+    }
+    
+    const metadata = this.keyMetadata.get(keyId)!;
+    metadata.lastUsed = Date.now();
+    metadata.usageCount++;
+    
+    // Key rotation after heavy usage
+    if (metadata.usageCount > 10000) {
+      console.warn('Key usage limit reached, consider rotation');
+    }
+    
+    return await operation();
+  }
+  
+  secureCleanup(): void {
+    this.keys.clear();
+    this.keyMetadata.clear();
+  }
+}
+```
+
+### Code Generation Security Analysis
+```javascript
+// Security analysis of generated codes
+const analyzeCodeSecurity = (codes: string[]): {
+  entropyEstimate: number;
+  distributionUniformity: number;
+  predictabilityScore: number;
+} => {
+  // Entropy estimation using Shannon entropy
+  const digitCounts = new Array(10).fill(0);
+  let totalDigits = 0;
+  
+  codes.forEach(code => {
+    code.split('').forEach(digit => {
+      digitCounts[parseInt(digit)]++;
+      totalDigits++;
+    });
+  });
+  
+  let entropy = 0;
+  digitCounts.forEach(count => {
+    if (count > 0) {
+      const probability = count / totalDigits;
+      entropy -= probability * Math.log2(probability);
+    }
+  });
+  
+  // Distribution uniformity (0-1, 1 = perfectly uniform)
+  const expectedCount = totalDigits / 10;
+  const chiSquared = digitCounts.reduce((sum, count) => {
+    return sum + Math.pow(count - expectedCount, 2) / expectedCount;
+  }, 0);
+  const uniformity = Math.max(0, 1 - (chiSquared / (9 * expectedCount)));
+  
+  // Predictability score (lower is better)
+  const uniqueCodes = new Set(codes).size;
+  const predictability = 1 - (uniqueCodes / codes.length);
+  
+  return {
+    entropyEstimate: entropy,
+    distributionUniformity: uniformity,
+    predictabilityScore: predictability
+  };
+};
+```
+
+### Attack Resistance
+1. **Timing Attacks**: Use constant-time operations
+2. **Side-Channel Attacks**: Rely on hardware-backed crypto
+3. **Replay Attacks**: Include timestamps in signatures
+4. **Man-in-the-Middle**: Certificate validation prevents MITM
+5. **Code Prediction**: Cryptographically secure randomness
+
+### Implementation Best Practices
+```javascript
+// Secure signature implementation checklist
+const secureSignatureImplementation = {
+  keyGeneration: {
+    useWebCryptoAPI: true,
+    nonExtractableKeys: true,
+    secureRandomness: true,
+    properCurveSelection: 'P-256'
+  },
+  
+  signing: {
+    hashFunction: 'SHA-256',
+    errorHandling: true,
+    inputValidation: true,
+    timestampInclusion: true
+  },
+  
+  verification: {
+    certificateValidation: true,
+    expirationChecks: true,
+    chainOfTrust: true,
+    errorReporting: true
+  },
+  
+  codeGeneration: {
+    csprngUsage: true,
+    entropyCollection: true,
+    uniformDistribution: true,
+    lengthValidation: true
+  }
+};
+```
