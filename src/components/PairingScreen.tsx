@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { KeyRound, Copy, ArrowRight, Shield, Award, Key, User, Clock } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { KeyRound, Copy, ArrowRight, Shield, Award, Key, User, Clock, AlertCircle, RefreshCw } from 'lucide-react';
 import Button from './ui/Button';
 import { useChat } from '../context/ChatContext';
 import { useCrypto } from '../context/CryptoContext';
@@ -10,7 +10,16 @@ interface PairingScreenProps {
 
 const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
   const { generateCode, joinChat, pairingCode, isPaired } = useChat();
-  const { certificate, isInitializing, generateCertificate, sessionActive, lastActivity } = useCrypto();
+  const { 
+    certificate, 
+    isInitializing, 
+    generateCertificate, 
+    sessionActive, 
+    lastActivity,
+    initializationError,
+    retryInitialization
+  } = useCrypto();
+  
   const [inputCode, setInputCode] = useState('');
   const [username, setUsername] = useState('');
   const [showUsernameInput, setShowUsernameInput] = useState(true);
@@ -18,7 +27,10 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
   const [isJoining, setIsJoining] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
+  const [usernameError, setUsernameError] = useState('');
+  const [isCreatingIdentity, setIsCreatingIdentity] = useState(false);
 
+  // Load saved username on mount and when certificate is available
   useEffect(() => {
     const savedUsername = localStorage.getItem('safeharbor-username');
     if (savedUsername && certificate) {
@@ -29,31 +41,72 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
     }
   }, [certificate]);
 
+  // Handle pairing completion
   useEffect(() => {
     if (isPaired) {
       onPaired();
     }
   }, [isPaired, onPaired]);
 
-  const handleSetUsername = async () => {
-    if (!username.trim()) {
-      setError('Please enter a valid username');
-      return;
+  // Clear errors when user starts typing
+  useEffect(() => {
+    if (username && usernameError) {
+      setUsernameError('');
+    }
+  }, [username, usernameError]);
+
+  useEffect(() => {
+    if (inputCode && error) {
+      setError('');
+    }
+  }, [inputCode, error]);
+
+  // Validate username input
+  const validateUsername = useCallback((value: string): string => {
+    const trimmed = value.trim();
+    
+    if (!trimmed) {
+      return 'Please enter a valid username';
     }
     
-    if (username.length < 2 || username.length > 20) {
-      setError('Username must be between 2-20 characters');
+    if (trimmed.length < 2) {
+      return 'Username must be at least 2 characters long';
+    }
+    
+    if (trimmed.length > 20) {
+      return 'Username must be 20 characters or less';
+    }
+    
+    // Check for valid characters (alphanumeric, spaces, hyphens, underscores)
+    if (!/^[a-zA-Z0-9\s\-_]+$/.test(trimmed)) {
+      return 'Username can only contain letters, numbers, spaces, hyphens, and underscores';
+    }
+    
+    return '';
+  }, []);
+
+  const handleSetUsername = async () => {
+    const validationError = validateUsername(username);
+    if (validationError) {
+      setUsernameError(validationError);
       return;
     }
 
+    setIsCreatingIdentity(true);
+    setUsernameError('');
+    setError('');
+
     try {
-      localStorage.setItem('safeharbor-username', username.trim());
-      await generateCertificate(username.trim());
+      const trimmedUsername = username.trim();
+      localStorage.setItem('safeharbor-username', trimmedUsername);
+      await generateCertificate(trimmedUsername);
       setShowUsernameInput(false);
-      setError('');
     } catch (error) {
-      setError('Failed to create digital identity. Please try again.');
       console.error('Certificate generation failed:', error);
+      setUsernameError('Failed to create digital identity. Please try again.');
+      localStorage.removeItem('safeharbor-username');
+    } finally {
+      setIsCreatingIdentity(false);
     }
   };
 
@@ -68,11 +121,18 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
       return;
     }
 
+    if (!sessionActive) {
+      setError('Session expired. Please refresh the page.');
+      return;
+    }
+
     setIsGenerating(true);
     setError('');
+    
     try {
       await generateCode();
     } catch (err) {
+      console.error('Failed to generate code:', err);
       setError('Failed to generate code. Please try again.');
     } finally {
       setIsGenerating(false);
@@ -85,8 +145,15 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
       return;
     }
 
-    if (!inputCode.trim()) {
+    const trimmedCode = inputCode.trim().toUpperCase();
+    
+    if (!trimmedCode) {
       setError('Please enter a valid code');
+      return;
+    }
+
+    if (trimmedCode.length !== 6) {
+      setError('Code must be exactly 6 characters');
       return;
     }
 
@@ -95,14 +162,21 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
       return;
     }
 
+    if (!sessionActive) {
+      setError('Session expired. Please refresh the page.');
+      return;
+    }
+
     setIsJoining(true);
     setError('');
+    
     try {
-      const success = await joinChat(inputCode.trim().toUpperCase());
+      const success = await joinChat(trimmedCode);
       if (!success) {
         setError('Invalid code or room not found. Make sure someone has created the room first.');
       }
     } catch (err) {
+      console.error('Failed to join chat:', err);
       setError('Failed to join chat. Please try again.');
     } finally {
       setIsJoining(false);
@@ -117,6 +191,19 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
         setTimeout(() => setCopied(false), 2000);
       } catch (err) {
         console.error('Failed to copy:', err);
+        // Fallback for browsers that don't support clipboard API
+        const textArea = document.createElement('textarea');
+        textArea.value = pairingCode;
+        document.body.appendChild(textArea);
+        textArea.select();
+        try {
+          document.execCommand('copy');
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        } catch (fallbackErr) {
+          console.error('Fallback copy failed:', fallbackErr);
+        }
+        document.body.removeChild(textArea);
       }
     }
   };
@@ -139,9 +226,67 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
   const resetUsername = () => {
     localStorage.removeItem('safeharbor-username');
     setUsername('');
+    setUsernameError('');
     setShowUsernameInput(true);
   };
 
+  const handleUsernameKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !isCreatingIdentity) {
+      handleSetUsername();
+    }
+  };
+
+  const handleCodeKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !isJoining) {
+      handleJoinChat();
+    }
+  };
+
+  // Handle initialization errors
+  if (initializationError) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-gray-900 to-red-900 flex flex-col items-center justify-center p-8">
+        <div className="text-center max-w-md">
+          <div className="w-20 h-20 bg-red-600 rounded-full flex items-center justify-center mx-auto mb-6">
+            <AlertCircle className="w-10 h-10 text-white" />
+          </div>
+          <h1 className="text-4xl font-bold mb-3 text-white">Initialization Failed</h1>
+          <p className="text-xl text-red-300 mb-6">Security System Error</p>
+          
+          <div className="bg-red-900/50 backdrop-blur-sm rounded-lg p-6 mb-6">
+            <p className="text-red-200 text-sm mb-4">
+              {initializationError}
+            </p>
+            <div className="space-y-3">
+              <Button
+                onClick={retryInitialization}
+                className="w-full"
+                variant="secondary"
+              >
+                <RefreshCw className="w-4 h-4 mr-2" />
+                Retry Initialization
+              </Button>
+              <Button
+                onClick={() => window.location.reload()}
+                className="w-full"
+                variant="danger"
+              >
+                Refresh Page
+              </Button>
+            </div>
+          </div>
+          
+          <div className="text-xs text-gray-400 space-y-1">
+            <p>• Ensure you're using HTTPS</p>
+            <p>• Use a modern browser (Chrome, Firefox, Safari, Edge)</p>
+            <p>• Check your internet connection</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Loading state
   if (isInitializing) {
     return (
       <div className="min-h-screen bg-gradient-to-b from-gray-900 to-indigo-900 flex flex-col items-center justify-center p-8">
@@ -220,25 +365,41 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
               Choose Your Identity
             </h2>
             <div className="space-y-4">
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="Enter your username"
-                className="w-full p-4 bg-gray-900/50 rounded-lg border border-gray-600 text-white placeholder-gray-400 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-                maxLength={20}
-                onKeyDown={(e) => e.key === 'Enter' && handleSetUsername()}
-              />
+              <div>
+                <input
+                  type="text"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  onKeyDown={handleUsernameKeyPress}
+                  placeholder="Enter your username"
+                  className={`w-full p-4 bg-gray-900/50 rounded-lg border text-white placeholder-gray-400 focus:ring-1 transition-colors ${
+                    usernameError 
+                      ? 'border-red-500 focus:border-red-500 focus:ring-red-500' 
+                      : 'border-gray-600 focus:border-indigo-500 focus:ring-indigo-500'
+                  }`}
+                  maxLength={20}
+                  disabled={isCreatingIdentity}
+                  autoComplete="username"
+                  autoFocus
+                />
+                {usernameError && (
+                  <p className="text-red-400 text-sm mt-2 flex items-center">
+                    <AlertCircle className="w-4 h-4 mr-1" />
+                    {usernameError}
+                  </p>
+                )}
+              </div>
               <p className="text-sm text-gray-400">
                 This will be your identity in the chat and on your digital certificate
               </p>
               <Button
                 onClick={handleSetUsername}
                 className="w-full"
-                disabled={!username.trim()}
+                disabled={!username.trim() || isCreatingIdentity}
+                isLoading={isCreatingIdentity}
               >
-                Create Digital Identity
-                <ArrowRight className="ml-2 w-5 h-5" />
+                {isCreatingIdentity ? 'Creating Identity...' : 'Create Digital Identity'}
+                {!isCreatingIdentity && <ArrowRight className="ml-2 w-5 h-5" />}
               </Button>
             </div>
           </div>
@@ -259,10 +420,14 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
                       className={`p-2 rounded-lg transition-colors ${
                         copied ? 'bg-green-600' : 'bg-gray-700 hover:bg-gray-600'
                       }`}
+                      title={copied ? 'Copied!' : 'Copy code'}
                     >
                       <Copy className="w-5 h-5" />
                     </button>
                   </div>
+                  {copied && (
+                    <p className="text-green-400 text-sm mb-2">✓ Copied to clipboard!</p>
+                  )}
                   <p className="text-sm text-gray-400 mb-4">
                     Share this code with someone to start a secure, signed conversation
                   </p>
@@ -283,13 +448,18 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
                     onClick={handleGenerateCode}
                     isLoading={isGenerating}
                     className="w-full"
-                    disabled={!certificate}
+                    disabled={!certificate || !sessionActive}
                   >
-                    Generate Secure Code
+                    {isGenerating ? 'Generating...' : 'Generate Secure Code'}
                   </Button>
                   {!certificate && (
                     <p className="text-sm text-amber-400 mt-2 text-center">
                       Creating digital certificate...
+                    </p>
+                  )}
+                  {!sessionActive && (
+                    <p className="text-sm text-red-400 mt-2 text-center">
+                      Session expired. Please refresh the page.
                     </p>
                   )}
                 </>
@@ -299,27 +469,36 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
             <div className="bg-gray-800/50 backdrop-blur-sm rounded-xl p-6 shadow-xl border border-gray-700">
               <h2 className="text-xl font-semibold mb-4">Join Existing Chat</h2>
               <div className="space-y-4">
-                <input
-                  type="text"
-                  value={inputCode}
-                  onChange={(e) => setInputCode(e.target.value.toUpperCase())}
-                  placeholder="Enter secure code"
-                  className="w-full p-4 bg-gray-900/50 rounded-lg border border-gray-600 text-white text-center text-xl font-mono tracking-wider placeholder-gray-400 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-                  maxLength={6}
-                  onKeyDown={(e) => e.key === 'Enter' && handleJoinChat()}
-                />
+                <div>
+                  <input
+                    type="text"
+                    value={inputCode}
+                    onChange={(e) => setInputCode(e.target.value.toUpperCase())}
+                    onKeyDown={handleCodeKeyPress}
+                    placeholder="Enter secure code"
+                    className="w-full p-4 bg-gray-900/50 rounded-lg border border-gray-600 text-white text-center text-xl font-mono tracking-wider placeholder-gray-400 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                    maxLength={6}
+                    disabled={isJoining}
+                    autoComplete="off"
+                  />
+                </div>
                 <Button
                   onClick={handleJoinChat}
                   isLoading={isJoining}
                   className="w-full"
-                  disabled={!inputCode.trim() || !certificate}
+                  disabled={!inputCode.trim() || !certificate || !sessionActive}
                 >
-                  Join Chat
-                  <ArrowRight className="ml-2 w-5 h-5" />
+                  {isJoining ? 'Joining...' : 'Join Chat'}
+                  {!isJoining && <ArrowRight className="ml-2 w-5 h-5" />}
                 </Button>
                 {!certificate && (
                   <p className="text-sm text-amber-400 text-center">
                     Waiting for certificate initialization...
+                  </p>
+                )}
+                {!sessionActive && (
+                  <p className="text-sm text-red-400 text-center">
+                    Session expired. Please refresh the page.
                   </p>
                 )}
               </div>
@@ -328,8 +507,12 @@ const PairingScreen: React.FC<PairingScreenProps> = ({ onPaired }) => {
         )}
 
         {error && (
-          <div className="bg-red-900/50 backdrop-blur-sm border border-red-700 text-red-200 p-4 rounded-xl text-center">
-            {error}
+          <div className="bg-red-900/50 backdrop-blur-sm border border-red-700 text-red-200 p-4 rounded-xl">
+            <div className="flex items-center space-x-2">
+              <AlertCircle className="w-5 h-5 text-red-400" />
+              <span className="font-medium">Error</span>
+            </div>
+            <p className="mt-1">{error}</p>
           </div>
         )}
 

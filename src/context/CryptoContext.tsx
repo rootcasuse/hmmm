@@ -12,6 +12,7 @@ interface CryptoContextType {
   isInitializing: boolean;
   sessionActive: boolean;
   lastActivity: number;
+  initializationError: string | null;
   generateKeyPair: () => Promise<KeyPair>;
   generateSigningKeyPair: () => Promise<SigningKeyPair>;
   generateCertificate: (subject: string) => Promise<Certificate>;
@@ -25,6 +26,7 @@ interface CryptoContextType {
   verifyCertificate: (cert: Certificate) => Promise<boolean>;
   updateActivity: () => void;
   reset: () => void;
+  retryInitialization: () => Promise<void>;
 }
 
 const CryptoContext = createContext<CryptoContextType | null>(null);
@@ -45,8 +47,10 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   const [isInitializing, setIsInitializing] = useState(true);
   const [sessionActive, setSessionActive] = useState(true);
   const [lastActivity, setLastActivity] = useState(Date.now());
+  const [initializationError, setInitializationError] = useState<string | null>(null);
   const [certificateManager] = useState(() => CertificateManager.getInstance());
   const [sessionStartTime] = useState(Date.now());
+  const [initializationAttempts, setInitializationAttempts] = useState(0);
 
   // Update activity timestamp
   const updateActivity = () => {
@@ -82,13 +86,13 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     const sessionTimeout = setInterval(() => {
       const now = Date.now();
       const inactiveTime = now - lastActivity;
-      const maxInactiveTime = 2 * 60 * 60 * 1000; // 2 hours instead of 30 minutes
+      const maxInactiveTime = 2 * 60 * 60 * 1000; // 2 hours
 
       if (inactiveTime > maxInactiveTime && sessionActive) {
         console.log('Session expired due to inactivity after 2 hours');
         setSessionActive(false);
       }
-    }, 5 * 60 * 1000); // Check every 5 minutes instead of every minute
+    }, 5 * 60 * 1000); // Check every 5 minutes
 
     return () => {
       activityEvents.forEach(event => {
@@ -100,30 +104,84 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     };
   }, [lastActivity, sessionActive]);
 
+  // Initialize crypto with comprehensive error handling
+  const initializeCrypto = async () => {
+    try {
+      setIsInitializing(true);
+      setInitializationError(null);
+      
+      // Check if Web Crypto API is available
+      if (!window.crypto || !window.crypto.subtle) {
+        throw new Error('Web Crypto API not supported in this browser. Please use a modern browser with HTTPS.');
+      }
+
+      // Always start with an active session
+      setSessionActive(true);
+      updateActivity();
+      
+      // Generate signing key pair with retry logic
+      let newSigningKeyPair: SigningKeyPair;
+      try {
+        newSigningKeyPair = await generateSigningKeyPair();
+      } catch (keyError) {
+        console.error('Failed to generate signing key pair:', keyError);
+        throw new Error('Failed to generate cryptographic keys. Please refresh the page and try again.');
+      }
+      
+      // Try to restore username and generate certificate
+      const savedUsername = localStorage.getItem('safeharbor-username');
+      if (savedUsername && newSigningKeyPair) {
+        try {
+          await generateCertificate(savedUsername);
+        } catch (certError) {
+          console.error('Failed to generate certificate:', certError);
+          // Don't throw here - user can re-enter username
+          localStorage.removeItem('safeharbor-username');
+        }
+      }
+      
+      setInitializationAttempts(0);
+      
+    } catch (error) {
+      console.error('Crypto initialization failed:', error);
+      setInitializationAttempts(prev => prev + 1);
+      
+      let errorMessage = 'Failed to initialize security system. ';
+      
+      if (error instanceof Error) {
+        if (error.message.includes('Web Crypto API')) {
+          errorMessage += error.message;
+        } else if (error.message.includes('cryptographic keys')) {
+          errorMessage += error.message;
+        } else {
+          errorMessage += 'Please ensure you are using a secure connection (HTTPS) and a modern browser.';
+        }
+      } else {
+        errorMessage += 'Unknown error occurred. Please refresh the page.';
+      }
+      
+      setInitializationError(errorMessage);
+      
+      // Auto-retry up to 3 times with exponential backoff
+      if (initializationAttempts < 3) {
+        const retryDelay = Math.pow(2, initializationAttempts) * 1000; // 1s, 2s, 4s
+        setTimeout(() => {
+          initializeCrypto();
+        }, retryDelay);
+      }
+    } finally {
+      setIsInitializing(false);
+    }
+  };
+
+  // Manual retry function
+  const retryInitialization = async () => {
+    setInitializationAttempts(0);
+    await initializeCrypto();
+  };
+
   // Initialize crypto on mount
   useEffect(() => {
-    const initializeCrypto = async () => {
-      try {
-        setIsInitializing(true);
-        
-        // Always start with an active session
-        setSessionActive(true);
-        updateActivity();
-        
-        const newSigningKeyPair = await generateSigningKeyPair();
-        
-        const savedUsername = localStorage.getItem('safeharbor-username');
-        if (savedUsername && newSigningKeyPair) {
-          await generateCertificate(savedUsername);
-        }
-        
-      } catch (error) {
-        console.error('Failed to initialize crypto:', error);
-      } finally {
-        setIsInitializing(false);
-      }
-    };
-
     initializeCrypto();
   }, []);
 
@@ -171,7 +229,7 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       return pair;
     } catch (error) {
       console.error('Failed to generate key pair:', error);
-      throw new Error('Key pair generation failed');
+      throw new Error('Key pair generation failed. Please try again.');
     }
   };
 
@@ -183,7 +241,7 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       return newKeyPair;
     } catch (error) {
       console.error('Failed to generate signing key pair:', error);
-      throw new Error('Signing key pair generation failed');
+      throw new Error('Signing key pair generation failed. Please try again.');
     }
   };
 
@@ -204,14 +262,14 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       
       // Set very long validity - certificate is valid as long as session is active
       cert.issuedAt = sessionStartTime;
-      cert.expiresAt = sessionStartTime + (365 * 24 * 60 * 60 * 1000); // 1 year max, but session controls actual validity
+      cert.expiresAt = sessionStartTime + (365 * 24 * 60 * 60 * 1000); // 1 year max
       
       setCertificate(cert);
       updateActivity();
       return cert;
     } catch (error) {
       console.error('Failed to generate certificate:', error);
-      throw new Error('Certificate generation failed');
+      throw new Error('Certificate generation failed. Please try again.');
     }
   };
 
@@ -228,7 +286,7 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       return code;
     } catch (error) {
       console.error('Failed to generate pairing code:', error);
-      throw new Error('Pairing code generation failed');
+      throw new Error('Pairing code generation failed. Please try again.');
     }
   };
 
@@ -257,7 +315,7 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       };
     } catch (error) {
       console.error('Failed to encrypt message:', error);
-      throw new Error('Message encryption failed');
+      throw new Error('Message encryption failed. Please try again.');
     }
   };
 
@@ -267,13 +325,13 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       return "Decrypted message";
     } catch (error) {
       console.error('Failed to decrypt message:', error);
-      throw new Error('Message decryption failed');
+      throw new Error('Message decryption failed. Please try again.');
     }
   };
 
   const signMessage = async (message: string): Promise<string> => {
     if (!signingKeyPair) {
-      throw new Error('Signing key pair not generated');
+      throw new Error('Signing key pair not generated. Please refresh the page.');
     }
 
     try {
@@ -282,7 +340,7 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       return signature;
     } catch (error) {
       console.error('Failed to sign message:', error);
-      throw new Error('Message signing failed');
+      throw new Error('Message signing failed. Please try again.');
     }
   };
 
@@ -293,7 +351,6 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
   ): Promise<boolean> => {
     try {
       // For message verification, we're more lenient - just check if the certificate is structurally valid
-      // and not worry about session expiration for peer certificates
       const isCertValid = await certificateManager.verifyCertificate(senderCert);
       
       if (!isCertValid) {
@@ -318,7 +375,7 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       return btoa(String.fromCharCode(...new Uint8Array(exported)));
     } catch (error) {
       console.error('Failed to export public key:', error);
-      throw new Error('Public key export failed');
+      throw new Error('Public key export failed. Please try again.');
     }
   };
 
@@ -339,14 +396,12 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       return key;
     } catch (error) {
       console.error('Failed to import public key:', error);
-      throw new Error('Public key import failed');
+      throw new Error('Public key import failed. Please try again.');
     }
   };
 
   const verifyCertificate = async (cert: Certificate): Promise<boolean> => {
     try {
-      // For certificate verification, we only check the cryptographic validity
-      // Session expiration is handled separately in the UI
       const isValid = await certificateManager.verifyCertificate(cert);
       updateActivity();
       return isValid;
@@ -367,6 +422,7 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
       setCertificate(null);
       setSharedSecret(null);
       setSessionActive(false);
+      setInitializationError(null);
       certificateManager.reset();
     } catch (error) {
       console.warn('Reset error:', error);
@@ -383,6 +439,7 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         isInitializing,
         sessionActive,
         lastActivity,
+        initializationError,
         generateKeyPair,
         generateSigningKeyPair,
         generateCertificate,
@@ -395,7 +452,8 @@ export const CryptoProvider: React.FC<{ children: ReactNode }> = ({ children }) 
         importPublicKey,
         verifyCertificate,
         updateActivity,
-        reset
+        reset,
+        retryInitialization
       }}
     >
       {children}
